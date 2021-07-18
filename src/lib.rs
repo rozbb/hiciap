@@ -8,6 +8,9 @@ mod hww;
 pub mod linkage;
 mod util;
 
+#[cfg(test)]
+mod test_circuit;
+
 /// An error type for anything that can go wrong when computing or verifying a HiCIAP proof
 pub enum HiciapError {
     VerificationFailed,

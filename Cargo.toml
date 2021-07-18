@@ -21,6 +21,10 @@ rayon = "1"
 
 [dev-dependencies]
 ark-bls12-381 = { version = "0.3", default-features = false, features = [ "curve" ] }
+ark-crypto-primitives = "0.3"
+ark-r1cs-std = "0.3"
+ark-relations = "0.3"
+arkworks-gadgets = "0.3"
 
 [features]
 default = ["asm", "parallel"]
