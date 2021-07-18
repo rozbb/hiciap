@@ -19,13 +19,15 @@ use ark_inner_products::{
 use ark_ip_proofs::{
     tipa::{
         structured_scalar_message::{structured_scalar_power, TIPAWithSSM, TIPAWithSSMProof},
-        TIPAProof, VerifierSRS, SRS, TIPA,
+        TIPAProof, TIPA,
     },
     Error,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_std::rand::{CryptoRng, Rng};
 use rayon::prelude::*;
+
+pub use ark_ip_proofs::tipa::{VerifierSRS as HiciapVerifKey, SRS as HiciapProvingKey};
 
 const HICIAP_DOMAIN_STR: &[u8] = b"HiCIAP";
 
@@ -76,9 +78,9 @@ type MultiExpInnerProductCProof<P> = TIPAWithSSMProof<
 /// The opening of a commitment to a hidden input (called com_{a_0} in the paper)
 #[derive(Clone)]
 pub struct HiddenInputOpening<P: PairingEngine> {
-    hidden_input: <P as PairingEngine>::Fr,
-    z1: <P as PairingEngine>::Fr,
-    z3: <P as PairingEngine>::Fr,
+    pub(crate) hidden_input: <P as PairingEngine>::Fr,
+    pub(crate) z1: <P as PairingEngine>::Fr,
+    pub(crate) z3: <P as PairingEngine>::Fr,
 }
 
 /// The components of a client-side multiexponentiation proof
@@ -127,7 +129,7 @@ pub struct HideMipp<P: PairingEngine> {
 type Mipp<P> = MultiExpInnerProductCProof<P>;
 
 /// Constructs a short random string that's used as a commitment key in HiCIAP
-pub fn setup_inner_product<P, R>(rng: &mut R, size: usize) -> Result<SRS<P>, Error>
+pub fn hiciap_setup<P, R>(rng: &mut R, size: usize) -> Result<HiciapProvingKey<P>, Error>
 where
     P: PairingEngine,
     R: Rng + CryptoRng,
@@ -187,8 +189,8 @@ fn masking_set(logn: u32) -> Vec<usize> {
 /// proofs.len()`.
 pub fn hiciap_prove<P, R>(
     rng: &mut R,
-    vk: &CircuitVerifyingKey<P>,
-    ip_srs: &SRS<P>,
+    hiciap_pk: &HiciapProvingKey<P>,
+    circuit_vk: &CircuitVerifyingKey<P>,
     proofs: &mut [Groth16Proof<P>],
     mut prepared_public_inputs: Option<&mut Vec<PreparedCircuitInput<P>>>,
     hidden_input: P::Fr,
@@ -219,7 +221,7 @@ where
     let logn = (num_proofs + 2).trailing_zeros();
     for idx in masking_set(logn) {
         let proof = &mut proofs[idx];
-        *proof = ark_groth16::rerandomize_proof(rng, vk, proof);
+        *proof = ark_groth16::rerandomize_proof(rng, circuit_vk, proof);
     }
 
     // Initialize blinding factors
@@ -266,8 +268,8 @@ where
             .par_iter()
             .map(|proof| proof.b.into_projective())
             .collect::<Vec<P::G2Projective>>();
-        buf.push(vk.gamma_g2.into_projective());
-        buf.push(vk.delta_g2.into_projective());
+        buf.push(circuit_vk.gamma_g2.into_projective());
+        buf.push(circuit_vk.delta_g2.into_projective());
 
         buf
     };
@@ -285,7 +287,7 @@ where
         buf
     };
 
-    let (ck_1, ck_2) = ip_srs.get_commitment_keys();
+    let (ck_1, ck_2) = hiciap_pk.get_commitment_keys();
 
     let com_a = PairingInnerProduct::<P>::inner_product(&a, &ck_1)?;
     let com_b = PairingInnerProduct::<P>::inner_product(&ck_2, &b)?;
@@ -355,7 +357,7 @@ where
         // We also need to collect the other bases of the HWW proof. G₃ = Σ_{i=0} r_i · W_{i,1}.
         // This is actually a partial result to the calculation of the above sum.
         let g1 = {
-            let w1 = &vk.gamma_abc_g1[1];
+            let w1 = &circuit_vk.gamma_abc_g1[1];
             let r_sum =
                 (r.pow(&[num_proofs as u64]) - &<P::Fr>::one()) / &(r.clone() - &<P::Fr>::one());
             w1.mul(r_sum.into_repr())
@@ -399,7 +401,7 @@ where
     // Prove that com_a and com_b represent commitments to A, B such that Aʳ * B = ip_ab where (*)
     // represents an inner pairing product operation, and Aʳ = Σ rᵢ·Aᵢ
     let tipa_proof_ab = PairingInnerProductAB::prove_with_srs_shift(
-        &ip_srs,
+        &hiciap_pk,
         (&a_r, &b),
         (&ck_1_r, &ck_2, &HomomorphicPlaceholderValue),
         &r,
@@ -446,7 +448,7 @@ where
             .collect();
 
         let mipp_proof_c = MultiExpInnerProductC::prove_with_structured_scalar_message(
-            &ip_srs,
+            &hiciap_pk,
             (&c_prime, &r_vec),
             (&ck_1, &HomomorphicPlaceholderValue),
         )?;
@@ -462,7 +464,7 @@ where
     // If the client-side multiexponentiation optim is enabled, prove MIPP on the aggregated inputs
     let mipp_proof_agg_inputs = if use_csm {
         Some(MultiExpInnerProductC::prove_with_structured_scalar_message(
-            &ip_srs,
+            &hiciap_pk,
             (prepared_public_inputs.as_ref().unwrap(), &r_vec),
             (&ck_1, &HomomorphicPlaceholderValue),
         )?)
@@ -545,13 +547,59 @@ where
     Ok(wire_agg)
 }
 
+/// Contains either the prepared public inputs of several proofs (of the same circuit), or a
+/// commitment thereto.
+pub enum VerifierInputs<'a, P: PairingEngine> {
+    /// Contains the prepared public inputs to all the circuits
+    List(&'a mut Vec<PreparedCircuitInput<P>>),
+    /// Contains a commitment to the prepared public inputs to all the circuit, as well as the
+    /// number of elements committed to
+    Com(ExtensionFieldElement<P>, usize),
+}
+
+impl<'a, P: PairingEngine> VerifierInputs<'a, P> {
+    fn num_proofs(&self) -> usize {
+        match self {
+            VerifierInputs::List(v) => v.len(),
+            VerifierInputs::Com(_, len) => *len,
+        }
+    }
+}
+
+impl<'a, P: PairingEngine> From<&'a mut Vec<PreparedCircuitInput<P>>> for VerifierInputs<'a, P> {
+    fn from(inputs: &'a mut Vec<PreparedCircuitInput<P>>) -> VerifierInputs<'a, P> {
+        VerifierInputs::List(inputs)
+    }
+}
+
+impl<'a, P: PairingEngine> VerifierInputs<'a, P> {
+    /// Computes the commitment to the given prepared public inputs. After this operation, this
+    /// `VerifierInputs` can be used with `hiciap_verify` on CSM proofs for fast verification.
+    pub fn compress(&mut self, hiciap_pk: &HiciapProvingKey<P>) -> Result<(), HiciapError> {
+        // If we're a list, commit to the list. Otherwise, we're already a commitment so do nothing
+        if let VerifierInputs::List(preprocessed_public_inputs) = self {
+            // Commit to the inputs. That is, compute ck₁*preprocessed_public_inputs where (*)
+            // is the inner pairing product operation.
+            let num_proofs = preprocessed_public_inputs.len();
+            let (ck_1, _) = hiciap_pk.get_commitment_keys();
+            let com = PairingInnerProduct::<P>::inner_product(
+                &preprocessed_public_inputs,
+                &ck_1[..num_proofs],
+            )?;
+
+            *self = VerifierInputs::Com(com, num_proofs);
+        }
+
+        Ok(())
+    }
+}
+
 /// Aggregates proofs which share the same verifying key
 pub fn hiciap_verify<P>(
-    ip_verifier_srs: &VerifierSRS<P>,
-    vk: &CircuitVerifyingKey<P>,
-    prepared_inputs: &[PreparedCircuitInput<P>],
+    hiciap_vk: &HiciapVerifKey<P>,
+    circuit_vk: &CircuitVerifyingKey<P>,
+    public_input_data: &VerifierInputs<P>,
     proof: &HiciapProof<P>,
-    use_csm: bool,
 ) -> Result<(), HiciapError>
 where
     P: PairingEngine,
@@ -560,7 +608,7 @@ where
     let gens: Vec<P::G1Projective> = get_pedersen_generators(3);
     let (p1, p2, p3) = (gens[0], gens[1], gens[2]);
 
-    let num_proofs = prepared_inputs.len();
+    let num_proofs = public_input_data.num_proofs();
 
     // Random linear combination of proofs
 
@@ -582,7 +630,7 @@ where
     // Check that com_a and com_b represent commitments to A, B such that Aʳ * B = ip_ab where (*)
     // represents an inner pairing product operation, and Aʳ = Σ rᵢ·Aᵢ
     let tipa_proof_ab_valid = PairingInnerProductAB::verify_with_srs_shift(
-        ip_verifier_srs,
+        hiciap_vk,
         &HomomorphicPlaceholderValue,
         (
             &proof.com_a,
@@ -636,7 +684,7 @@ where
 
         // Verify MIPP wrt com', agg', and the given MIPP transcript
         MultiExpInnerProductC::verify_with_structured_scalar_message(
-            ip_verifier_srs,
+            hiciap_vk,
             &HomomorphicPlaceholderValue,
             (&com_prime, &IdentityOutput(vec![agg_prime])),
             &r,
@@ -651,7 +699,7 @@ where
     // used in the HWW proof.
     let g = P::G1Projective::prime_subgroup_generator();
     let g1 = {
-        let w1 = &vk.gamma_abc_g1[1];
+        let w1 = &circuit_vk.gamma_abc_g1[1];
         w1.mul(r_sum.into_repr())
     };
     let g2 = g.mul(r.pow(&[num_proofs as u64]).into_repr());
@@ -668,39 +716,53 @@ where
     )
     .map_err(|_| HiciapError::VerificationFailed)?;
 
-    // If use_csm is set, verify the MIPP proof on agg_inputs. Otherwise, compute agg_inputs
-    // yourself
-    let agg_inputs = if use_csm && proof.csm_data.is_some() {
-        let csm_data = proof.csm_data.as_ref().unwrap();
+    // If CSM data is given and we have an input commitment, verify the given MIPP proof.
+    // Otherwise, compute agg_inputs yourself.
+    let agg_inputs = match public_input_data {
+        VerifierInputs::Com(com_inputs, _) => {
+            if let Some(ref csm_data) = proof.csm_data {
+                // Check that the input commitment matches our input commitment
+                // TODO: This is technically public inputs but it wouldn't hurt to make this
+                // constant time
+                if com_inputs != &csm_data.com_inputs {
+                    return Err(HiciapError::VerificationFailed);
+                }
 
-        // Check that agg_inputs is correctly computed
-        MultiExpInnerProductC::verify_with_structured_scalar_message(
-            ip_verifier_srs,
-            &HomomorphicPlaceholderValue,
-            (
-                &csm_data.com_inputs,
-                &IdentityOutput(vec![csm_data.agg_inputs]),
-            ),
-            &r,
-            &csm_data.mipp_proof_agg_inputs,
-        )?;
+                // Check that agg_inputs is correctly computed
+                MultiExpInnerProductC::verify_with_structured_scalar_message(
+                    hiciap_vk,
+                    &HomomorphicPlaceholderValue,
+                    (
+                        &csm_data.com_inputs,
+                        &IdentityOutput(vec![csm_data.agg_inputs]),
+                    ),
+                    &r,
+                    &csm_data.mipp_proof_agg_inputs,
+                )?;
 
-        csm_data.agg_inputs
-    } else {
-        let r_vec = structured_scalar_power(num_proofs + 2, &r);
-        MultiexponentiationInnerProduct::<P::G1Projective>::inner_product(
-            &prepared_inputs,
-            &r_vec[..num_proofs],
-        )?
+                csm_data.agg_inputs
+            } else {
+                // Error: We have been given a commitment, but no CSM to use it on. We can't verify
+                // this proof
+                return Err(HiciapError::NoCsmAvailable);
+            }
+        }
+        VerifierInputs::List(prepared_public_inputs) => {
+            let r_vec = structured_scalar_power(num_proofs + 2, &r);
+            MultiexponentiationInnerProduct::<P::G1Projective>::inner_product(
+                &prepared_public_inputs,
+                &r_vec[..num_proofs],
+            )?
+        }
     };
 
     let p1 = P::pairing(
-        vk.alpha_g1.into_projective().mul(r_sum.into_repr()),
-        vk.beta_g2,
+        circuit_vk.alpha_g1.into_projective().mul(r_sum.into_repr()),
+        circuit_vk.beta_g2,
     );
-    let p2 = P::pairing(agg_inputs, vk.gamma_g2);
-    let p3 = P::pairing(proof.agg_c, vk.delta_g2);
-    let p4 = P::pairing(proof.hidden_wire_com, vk.gamma_g2);
+    let p2 = P::pairing(agg_inputs, circuit_vk.gamma_g2);
+    let p3 = P::pairing(proof.agg_c, circuit_vk.delta_g2);
+    let p4 = P::pairing(proof.hidden_wire_com, circuit_vk.gamma_g2);
 
     // Ensure that Aʳ * B = Z where Z is the product of all the above factors
     let ppe_valid = proof.ip_ab.0 == ((p1 * &p2) * &p3) * &p4;
@@ -711,7 +773,6 @@ where
         Err(HiciapError::VerificationFailed)
     }
 }
-
 /*
 #[cfg(test)]
 mod test {
