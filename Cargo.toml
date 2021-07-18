@@ -3,6 +3,7 @@ name = "hiciap"
 version = "0.1.0"
 authors = ["Michael Rosenberg <michael@mrosenberg.pub>"]
 edition = "2018"
+license = "MIT/Apache-2.0"
 
 [dependencies]
 ark-ip-proofs = { git = "https://github.com/arkworks-rs/ripp" }
