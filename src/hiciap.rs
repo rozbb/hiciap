@@ -128,19 +128,22 @@ pub struct HideMipp<P: PairingEngine> {
 /// Transcript of an execution of the MIPP protocol
 type Mipp<P> = MultiExpInnerProductCProof<P>;
 
-/// Constructs a short random string that's used as a commitment key in HiCIAP
-pub fn hiciap_setup<P, R>(rng: &mut R, size: usize) -> Result<HiciapProvingKey<P>, Error>
+/// Constructs a short random string that's used as a commitment key in HiCIAP. Supports up to
+/// `num_proofs` many Groth16 proofs.
+pub fn hiciap_setup<P, R>(rng: &mut R, num_proofs: usize) -> Result<HiciapProvingKey<P>, Error>
 where
     P: PairingEngine,
     R: Rng + CryptoRng,
 {
-    let (srs, _) = PairingInnerProductAB::<P>::setup(rng, size)?;
+    // There's a num_proofs + 2 elements in the A and B vectors in HiCIAP
+    let srs_size = num_proofs + 2;
+    let (srs, _) = PairingInnerProductAB::<P>::setup(rng, srs_size)?;
     Ok(srs)
 }
 
 /// Helper function which computes e(blind, G₂) + (v * ck_right), where (*) denotes inner pairing
 /// product.
-pub fn blinded_com<P>(
+fn blinded_com<P>(
     v: &[P::G1Projective],
     ck_right: &[P::G2Projective],
     blind: &P::Fr,
@@ -181,7 +184,7 @@ fn masking_set(logn: u32) -> Vec<usize> {
 // TODO: Automatically pad out the inputs
 // TODO: Figure out what gets mutated if an error occurs
 /// Aggregates multiple proofs over the same circuit, also proving that each proof shares the same
-/// first witness value, `hidden_input`.
+/// first witness value, `hidden_input`. This will rerandomize a subset of `proofs`.
 ///
 /// Panics
 /// ======
@@ -773,6 +776,75 @@ where
         Err(HiciapError::VerificationFailed)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test_circuit::{gen_preimage_circuit_params, gen_preimage_proof};
+
+    use core::iter;
+
+    use ark_bls12_381::{Bls12_381, Fr};
+    use ark_groth16::Proof as Groth16Proof;
+    use ark_std::UniformRand;
+
+    type P = Bls12_381;
+
+    #[test]
+    fn test_hiciap_correctness() {
+        let mut rng = ark_std::test_rng();
+
+        // Fix all the constants
+        let num_proofs = 2usize.pow(7) - 2;
+        let num_extra_circuit_inputs = 10;
+
+        // Generate all the (short) common random strings
+        let hiciap_pk = hiciap_setup(&mut rng, num_proofs).unwrap();
+        let hiciap_vk = hiciap_pk.get_verifier_key();
+        let circuit_pk = gen_preimage_circuit_params(&mut rng, num_extra_circuit_inputs);
+        let circuit_vk = &circuit_pk.vk;
+
+        // Construct a bunch of Groth16 proofs wrt the same hidden input
+        let hidden_input = Fr::rand(&mut rng);
+        let groth16_proofs_and_inputs: Vec<(Groth16Proof<P>, Vec<Fr>)> = iter::repeat_with(|| {
+            gen_preimage_proof(
+                &mut rng,
+                &circuit_pk,
+                &hidden_input,
+                num_extra_circuit_inputs,
+            )
+        })
+        .take(num_proofs)
+        .collect();
+
+        // Separate out the proofs and their public inputs
+        let mut groth16_proofs: Vec<Groth16Proof<P>> = groth16_proofs_and_inputs
+            .iter()
+            .map(|e| e.0.clone())
+            .collect();
+        let mut prepared_public_inputs: Vec<PreparedCircuitInput<P>> = groth16_proofs_and_inputs
+            .iter()
+            .map(|e| prepare_circuit_input(&circuit_vk, &e.1).unwrap())
+            .collect();
+
+        // Compute a HiCIAP proof with CSM
+        let (hiciap_proof, _) = hiciap_prove(
+            &mut rng,
+            &hiciap_pk,
+            &circuit_vk,
+            &mut groth16_proofs,
+            Some(&mut prepared_public_inputs),
+            hidden_input,
+        )
+        .unwrap();
+
+        // Now verify using CSM as well
+        let mut verifier_inputs: VerifierInputs<P> = (&mut prepared_public_inputs).into();
+        verifier_inputs.compress(&hiciap_pk).unwrap();
+        hiciap_verify(&hiciap_vk, &circuit_vk, &verifier_inputs, &hiciap_proof).unwrap();
+    }
+}
+
 /*
 #[cfg(test)]
 mod test {

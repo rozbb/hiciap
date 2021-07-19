@@ -143,10 +143,12 @@ pub(crate) fn gen_preimage_circuit_params<R: Rng>(
     generate_random_parameters::<Bls12_381, _, _>(param_gen_circuit, rng).unwrap()
 }
 
-/// Generate a random preimage circuit that we can use in testing
+/// Generate a random preimage circuit that we can use in testing. Returns a proof and the public
+/// inputs, excluding `k`.
 pub(crate) fn gen_preimage_proof<R: Rng>(
     rng: &mut R,
     pk: &CircuitProvingKey<Bls12_381>,
+    k: &Fr,
     num_extra_inputs: usize,
 ) -> (Groth16Proof<Bls12_381>, Vec<Fr>) {
     use ark_ff::ToConstraintField;
@@ -157,7 +159,6 @@ pub(crate) fn gen_preimage_proof<R: Rng>(
     };
 
     let hash_params = setup_params::<Fr>(Curve::Bls381);
-    let k = Fr::rand(rng);
     let i = Fr::rand(rng);
     let hash = compute_hash::<_, PoseidonRounds>(&hash_params, &k, &i);
     let zeros = vec![Fr::zero(); num_extra_inputs];
@@ -165,7 +166,7 @@ pub(crate) fn gen_preimage_proof<R: Rng>(
     // This is the circuit we'll prove
     let real_circuit = HashPreimageCircuit::<_, PoseidonRounds> {
         num_extra_inputs,
-        k: Some(k),
+        k: Some(*k),
         i: Some(i),
         expected_hash: Some(hash),
         extra_inputs: Some(zeros.clone()),
@@ -178,7 +179,6 @@ pub(crate) fn gen_preimage_proof<R: Rng>(
 
     // Verify the proof
     let public_inputs = [
-        k.to_field_elements().unwrap(),
         i.to_field_elements().unwrap(),
         hash.to_field_elements().unwrap(),
         zeros,
@@ -237,8 +237,16 @@ mod test {
     fn test_groth16_correctness() {
         let mut rng = ark_std::test_rng();
 
+        // Make the CRS
         let pk = gen_preimage_circuit_params(&mut rng, NUM_EXTRA_INPUTS);
-        let (proof, public_inputs) = gen_preimage_proof(&mut rng, &pk, NUM_EXTRA_INPUTS);
+
+        // Compute the proof wrt k
+        let k = Fr::rand(&mut rng);
+        let (proof, mut public_inputs) = gen_preimage_proof(&mut rng, &pk, &k, NUM_EXTRA_INPUTS);
+
+        // Verify the proof. We need to prepend k to the public inputs because it's technically a
+        // Groth16 public input
+        public_inputs.insert(0, k);
         let pvk = prepare_verifying_key(&pk.vk);
         assert!(verify_proof(&pvk, &proof, &public_inputs).unwrap());
     }
