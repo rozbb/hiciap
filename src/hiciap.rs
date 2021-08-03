@@ -375,14 +375,18 @@ where
         // The other base used in the HWW proof. G₄ = r^{n+1} · G
         let g2 = g.mul(r_vec[num_proofs].into_repr());
 
-        // Calculate the commitment (z₁r^{n+1})G + wire_val_sum and construct the proof of
-        // well-formedness wrt the commitment to a₀
-        let wire_com = blinding_factor + &wire_val_sum;
+        // Calculate the commitment (z₁r^{n+1})G + wire_val_sum
+        let hidden_wire_com = blinding_factor + &wire_val_sum;
+
+        // Update the transcript
+        transcript.append_message(b"hidden_wire_com", &to_bytes!(hidden_wire_com).unwrap());
+
+        // Construct the proof of well-formedness wrt the commitment to a₀
         let proof = prove_hww(
             rng,
             &mut transcript,
             &com_a0,
-            &wire_com,
+            &hidden_wire_com,
             &p1,
             &p2,
             &p3,
@@ -393,11 +397,8 @@ where
             &z3,
         );
 
-        (wire_com, proof)
+        (hidden_wire_com, proof)
     };
-
-    // Update the transcript
-    transcript.append_message(b"hidden_wire_com", &to_bytes!(hidden_wire_com).unwrap());
 
     let ck_1_r = ck_1
         .par_iter()
@@ -644,6 +645,10 @@ where
     let agg_inputs = proof.csm_data.as_ref().map(|d| &d.agg_inputs);
     transcript.append_message(b"agg_c", &to_bytes!(proof.agg_c).unwrap());
     transcript.append_message(b"agg_inputs", &to_bytes!(agg_inputs).unwrap());
+    transcript.append_message(
+        b"hidden_wire_com",
+        &to_bytes!(proof.hidden_wire_com).unwrap(),
+    );
 
     // Check the well-formedness of the given hidden input commitment. Calculate the bases G₃, G₄
     // used in the HWW proof.
@@ -669,10 +674,6 @@ where
     }
 
     // Update the transcript
-    transcript.append_message(
-        b"hidden_wire_com",
-        &to_bytes!(proof.hidden_wire_com).unwrap(),
-    );
     transcript.append_message(b"agg_q", &to_bytes!(proof.hide_mipp_proof_c.agg_q).unwrap());
     transcript.append_message(b"com_q", &to_bytes!(proof.hide_mipp_proof_c.com_q).unwrap());
 
