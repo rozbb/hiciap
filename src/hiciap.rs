@@ -1,6 +1,6 @@
 use crate::{
     hww::{prove_hww, verify_hww, HwwProof},
-    util::{get_pedersen_generators, hash_to_field},
+    util::{get_field_chal, get_pedersen_generators},
     HiciapError,
 };
 
@@ -25,13 +25,15 @@ use ark_ip_proofs::{
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_std::rand::{CryptoRng, Rng};
+use merlin::Transcript;
 use rayon::prelude::*;
 
 pub use ark_ip_proofs::tipa::{VerifierSRS as HiciapVerifKey, SRS as HiciapProvingKey};
 
 const HICIAP_DOMAIN_STR: &[u8] = b"HiCIAP";
 
-// We use Blake2s for noninteractive protocols everywhere in this crate.
+// TODO: Update RIPP to use Merlin instead of their own Blake2 thing
+// The RIPP crates uses Blake2 for noninteractive protocol challenges
 type D = blake2::Blake2s;
 
 /// A single group element representing all the public inputs to a circuit
@@ -308,19 +310,18 @@ where
         None
     };
 
+    // This is the hashed transcript, used for the Fiat-Shamir transform. We update as the protocol
+    // goes along
+    let mut transcript = Transcript::new(HICIAP_DOMAIN_STR);
+    transcript.append_message(b"com_a0", &to_bytes!(com_a0).unwrap());
+    transcript.append_message(b"com_a", &to_bytes!(com_a).unwrap());
+    transcript.append_message(b"com_b", &to_bytes!(com_b).unwrap());
+    transcript.append_message(b"com_c", &to_bytes!(com_c).unwrap());
+    transcript.append_message(b"com_inputs", &to_bytes!(com_inputs).unwrap());
+
     // Random linear combination of proofs
 
-    let r = hash_to_field(
-        &to_bytes![
-            HICIAP_DOMAIN_STR,
-            &com_a0,
-            &com_a,
-            &com_b,
-            &com_c,
-            &com_inputs
-        ]
-        .unwrap(),
-    );
+    let r = get_field_chal(b"r", &mut transcript);
     let r_vec = structured_scalar_power(num_proofs + 2, &r);
 
     let a_r = a
@@ -342,6 +343,10 @@ where
     } else {
         None
     };
+
+    // Update the transcript
+    transcript.append_message(b"agg_c", &to_bytes!(agg_c).unwrap());
+    transcript.append_message(b"agg_inputs", &to_bytes!(agg_inputs).unwrap());
 
     // The hidden common input commitment is
     //     (z₁rⁿ)·G + Σ_{i=0}^{n-1} (hidden_input · rⁱ) · W_{i,1}
@@ -375,6 +380,7 @@ where
         let wire_com = blinding_factor + &wire_val_sum;
         let proof = prove_hww(
             rng,
+            &mut transcript,
             &com_a0,
             &wire_com,
             &p1,
@@ -389,6 +395,9 @@ where
 
         (wire_com, proof)
     };
+
+    // Update the transcript
+    transcript.append_message(b"hidden_wire_com", &to_bytes!(hidden_wire_com).unwrap());
 
     let ck_1_r = ck_1
         .par_iter()
@@ -422,32 +431,20 @@ where
         let agg_q = MultiexponentiationInnerProduct::<P::G1Projective>::inner_product(&q, &r_vec)?;
         let com_q = blinded_com(&q, &ck_1, &rho)?;
 
+        // Update the transcript for the upcoming MIPP proof
+        transcript.append_message(b"agg_q", &to_bytes!(agg_q).unwrap());
+        transcript.append_message(b"com_q", &to_bytes!(com_q).unwrap());
+
         // Generate a challenge by hashing the transcript so far
-        let chal: P::Fr = hash_to_field(
-            &to_bytes![
-                HICIAP_DOMAIN_STR,
-                &com_a0,
-                &com_a,
-                &com_b,
-                &com_c,
-                &com_inputs,
-                r,
-                agg_c,
-                agg_inputs,
-                hidden_wire_com,
-                agg_q,
-                com_q
-            ]
-            .unwrap(),
-        );
+        let hide_mipp_chal: P::Fr = get_field_chal(b"hide_mipp_chal", &mut transcript);
 
         // ρ' := chal·z₄ + ρ
         // C' := chal·C + Q
-        let rho_prime = chal * z4 + rho;
+        let rho_prime = hide_mipp_chal * z4 + rho;
         let c_prime: Vec<P::G1Projective> = c
             .iter()
             .zip(q.iter())
-            .map(|(c, q)| c.mul(&chal) + q)
+            .map(|(c, q)| c.mul(&hide_mipp_chal) + q)
             .collect();
 
         let mipp_proof_c = MultiExpInnerProductC::prove_with_structured_scalar_message(
@@ -603,7 +600,7 @@ pub fn hiciap_verify<P>(
     circuit_vk: &CircuitVerifyingKey<P>,
     public_input_data: &VerifierInputs<P>,
     proof: &HiciapProof<P>,
-) -> Result<(), HiciapError>
+) -> Result<bool, HiciapError>
 where
     P: PairingEngine,
 {
@@ -612,23 +609,19 @@ where
     let (p1, p2, p3) = (gens[0], gens[1], gens[2]);
 
     let num_proofs = public_input_data.num_proofs();
+    let com_inputs = proof.csm_data.as_ref().map(|d| &d.com_inputs);
+
+    // This is the hashed transcript, used for the Fiat-Shamir transform. We update as the protocol
+    // goes along
+    let mut transcript = Transcript::new(HICIAP_DOMAIN_STR);
+    transcript.append_message(b"com_a0", &to_bytes!(proof.com_a0).unwrap());
+    transcript.append_message(b"com_a", &to_bytes!(proof.com_a).unwrap());
+    transcript.append_message(b"com_b", &to_bytes!(proof.com_b).unwrap());
+    transcript.append_message(b"com_c", &to_bytes!(proof.com_c).unwrap());
+    transcript.append_message(b"com_inputs", &to_bytes!(com_inputs).unwrap());
 
     // Random linear combination of proofs
-
-    let r: P::Fr = {
-        let com_inputs = proof.csm_data.as_ref().map(|d| &d.com_inputs);
-        hash_to_field(
-            &to_bytes![
-                HICIAP_DOMAIN_STR,
-                &proof.com_a0,
-                &proof.com_a,
-                &proof.com_b,
-                &proof.com_c,
-                com_inputs
-            ]
-            .unwrap(),
-        )
-    };
+    let r = get_field_chal(b"r", &mut transcript);
 
     // Check that com_a and com_b represent commitments to A, B such that Aʳ * B = ip_ab where (*)
     // represents an inner pairing product operation, and Aʳ = Σ rᵢ·Aᵢ
@@ -644,30 +637,49 @@ where
         &r,
     )?;
 
+    // Σ_{i=0}^{n-2} rⁱ = (r^{n-1} - 1) / (r - 1)
+    let r_sum = (r.pow(&[num_proofs as u64]) - &<P::Fr>::one()) / &(r.clone() - &<P::Fr>::one());
+
+    // Update the transcript
+    let agg_inputs = proof.csm_data.as_ref().map(|d| &d.agg_inputs);
+    transcript.append_message(b"agg_c", &to_bytes!(proof.agg_c).unwrap());
+    transcript.append_message(b"agg_inputs", &to_bytes!(agg_inputs).unwrap());
+
+    // Check the well-formedness of the given hidden input commitment. Calculate the bases G₃, G₄
+    // used in the HWW proof.
+    let g = P::G1Projective::prime_subgroup_generator();
+    let g1 = {
+        let w1 = &circuit_vk.gamma_abc_g1[1];
+        w1.mul(r_sum.into_repr())
+    };
+    let g2 = g.mul(r.pow(&[num_proofs as u64]).into_repr());
+
+    if !verify_hww(
+        &mut transcript,
+        &proof.hidden_input_proof,
+        &proof.com_a0,
+        &proof.hidden_wire_com,
+        &p1,
+        &p2,
+        &p3,
+        &g1,
+        &g2,
+    ) {
+        return Ok(false);
+    }
+
+    // Update the transcript
+    transcript.append_message(
+        b"hidden_wire_com",
+        &to_bytes!(proof.hidden_wire_com).unwrap(),
+    );
+    transcript.append_message(b"agg_q", &to_bytes!(proof.hide_mipp_proof_c.agg_q).unwrap());
+    transcript.append_message(b"com_q", &to_bytes!(proof.hide_mipp_proof_c.com_q).unwrap());
+
     // Check that com_c represents a C such that Cʳ = agg_c
     let tipa_proof_c_valid = {
         // Generate a challenge by hashing the transcript so far
-        let chal: P::Fr = {
-            let com_inputs = proof.csm_data.as_ref().map(|d| &d.com_inputs);
-            let agg_inputs = proof.csm_data.as_ref().map(|d| &d.agg_inputs);
-            hash_to_field(
-                &to_bytes![
-                    HICIAP_DOMAIN_STR,
-                    &proof.com_a0,
-                    &proof.com_a,
-                    &proof.com_b,
-                    &proof.com_c,
-                    com_inputs,
-                    r,
-                    proof.agg_c,
-                    agg_inputs,
-                    proof.hidden_wire_com,
-                    proof.hide_mipp_proof_c.agg_q,
-                    proof.hide_mipp_proof_c.com_q
-                ]
-                .unwrap(),
-            )
-        };
+        let hide_mipp_chal: P::Fr = get_field_chal(b"hide_mipp_chal", &mut transcript);
 
         // Compute e(G^{-ρ'}, H) where H is some element from P::G2
         let g_neg_rho_prime = {
@@ -681,9 +693,11 @@ where
 
         // Compute the new commitment and aggregation that we'll run MIPP on
         let com_prime = ExtensionFieldElement(
-            proof.com_c.0.pow(chal.into_repr()) * proof.hide_mipp_proof_c.com_q.0 * blinding_factor,
+            proof.com_c.0.pow(hide_mipp_chal.into_repr())
+                * proof.hide_mipp_proof_c.com_q.0
+                * blinding_factor,
         );
-        let agg_prime = proof.agg_c.mul(chal.into_repr()) + proof.hide_mipp_proof_c.agg_q;
+        let agg_prime = proof.agg_c.mul(hide_mipp_chal.into_repr()) + proof.hide_mipp_proof_c.agg_q;
 
         // Verify MIPP wrt com', agg', and the given MIPP transcript
         MultiExpInnerProductC::verify_with_structured_scalar_message(
@@ -694,30 +708,6 @@ where
             &proof.hide_mipp_proof_c.mipp_proof_c,
         )?
     };
-
-    // Σ_{i=0}^{n-2} rⁱ = (r^{n-1} - 1) / (r - 1)
-    let r_sum = (r.pow(&[num_proofs as u64]) - &<P::Fr>::one()) / &(r.clone() - &<P::Fr>::one());
-
-    // Check the well-formedness of the given hidden input commitment. Calculate the bases G₃, G₄
-    // used in the HWW proof.
-    let g = P::G1Projective::prime_subgroup_generator();
-    let g1 = {
-        let w1 = &circuit_vk.gamma_abc_g1[1];
-        w1.mul(r_sum.into_repr())
-    };
-    let g2 = g.mul(r.pow(&[num_proofs as u64]).into_repr());
-
-    verify_hww(
-        &proof.hidden_input_proof,
-        &proof.com_a0,
-        &proof.hidden_wire_com,
-        &p1,
-        &p2,
-        &p3,
-        &g1,
-        &g2,
-    )
-    .map_err(|_| HiciapError::VerificationFailed)?;
 
     // If CSM data is given and we have an input commitment, verify the given MIPP proof.
     // Otherwise, compute agg_inputs yourself.
@@ -770,11 +760,7 @@ where
     // Ensure that Aʳ * B = Z where Z is the product of all the above factors
     let ppe_valid = proof.ip_ab.0 == ((p1 * &p2) * &p3) * &p4;
 
-    if tipa_proof_ab_valid && tipa_proof_c_valid && ppe_valid {
-        Ok(())
-    } else {
-        Err(HiciapError::VerificationFailed)
-    }
+    Ok(tipa_proof_ab_valid && tipa_proof_c_valid && ppe_valid)
 }
 
 #[cfg(test)]
@@ -841,7 +827,7 @@ mod test {
         // Now verify using CSM as well
         let mut verifier_inputs: VerifierInputs<P> = (&mut prepared_public_inputs).into();
         verifier_inputs.compress(&hiciap_pk).unwrap();
-        hiciap_verify(&hiciap_vk, &circuit_vk, &verifier_inputs, &hiciap_proof).unwrap();
+        assert!(hiciap_verify(&hiciap_vk, &circuit_vk, &verifier_inputs, &hiciap_proof).unwrap());
     }
 }
 

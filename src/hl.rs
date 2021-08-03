@@ -1,4 +1,4 @@
-use crate::util::hash_to_field;
+use crate::util::get_field_chal;
 
 use core::iter;
 use std::io::{Read, Write};
@@ -7,6 +7,7 @@ use ark_ec::group::Group;
 use ark_ff::{to_bytes, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_std::rand::{CryptoRng, Rng};
+use merlin::Transcript;
 
 const HL_DOMAIN_STR: &[u8] = b"HL";
 
@@ -23,13 +24,15 @@ where
     pub(crate) resp_ts: Vec<G::ScalarField>,
 }
 
-/// Proves ZK { ((Uᵢ)_{i=1}^k, G₁, G₂, G₃ ; w, (xᵢ, yᵢ)_{i=1}^n) : ∀i Uᵢ = wG₁+xᵢG₂+yᵢG₃ }
+/// Proves ZK { ((Uᵢ)_{i=1}^k, G₁, G₂, G₃ ; w, (xᵢ, yᵢ)_{i=1}^n) : ∀i Uᵢ = wG₁+xᵢG₂+yᵢG₃ }. Uses
+/// the context provided by `transcript` to create the ZK challenge.
 ///
 /// Panics
 /// ======
 /// Panics if the relation does not hold wrt the given values.
 pub fn prove_hl<G, R>(
     rng: &mut R,
+    transcript: &mut Transcript,
     us: &[G],
     g1: &G,
     g2: &G,
@@ -67,8 +70,16 @@ where
         .map(|(beta, gamma)| g1.mul(&alpha) + g2.mul(beta) + g3.mul(gamma))
         .collect();
 
-    // Let the challenge be the hash of the transcript
-    let c: G::ScalarField = hash_to_field(&to_bytes![HL_DOMAIN_STR, us, g1, g2, g3, com].unwrap());
+    // Update the transcript
+    transcript.append_message(b"HL domain", HL_DOMAIN_STR);
+    transcript.append_message(b"us", &to_bytes!(us).unwrap());
+    transcript.append_message(b"g1", &to_bytes!(g1).unwrap());
+    transcript.append_message(b"g2", &to_bytes!(g2).unwrap());
+    transcript.append_message(b"g3", &to_bytes!(g3).unwrap());
+    transcript.append_message(b"com", &to_bytes!(com).unwrap());
+
+    // Get a challenge from the transcript hash
+    let c: G::ScalarField = get_field_chal(b"c", transcript);
 
     // Respond with r = α-cw and ∀i (sᵢ, tᵢ) = (βᵢ-cxᵢ, γᵢ-cyᵢ)
     let resp_r = alpha - &(c * w);
@@ -91,8 +102,16 @@ where
     }
 }
 
-/// Verifies ZK { ((Uᵢ)_{i=1}^k, G₁, G₂, G₃ ; w, (xᵢ, yᵢ)_{i=1}^n) : ∀i Uᵢ = wG₁+xᵢG₂+yᵢG₃ }
-pub fn verify_hl<G>(proof: &HlProof<G>, us: &[G], g1: &G, g2: &G, g3: &G) -> Result<(), ()>
+/// Verifies ZK { ((Uᵢ)_{i=1}^k, G₁, G₂, G₃ ; w, (xᵢ, yᵢ)_{i=1}^n) : ∀i Uᵢ = wG₁+xᵢG₂+yᵢG₃ }. Uses
+/// the context provided by `transcript` to create the ZK challenge.
+pub fn verify_hl<G>(
+    transcript: &mut Transcript,
+    proof: &HlProof<G>,
+    us: &[G],
+    g1: &G,
+    g2: &G,
+    g3: &G,
+) -> bool
 where
     G: Group + CanonicalSerialize + CanonicalDeserialize,
 {
@@ -104,8 +123,16 @@ where
         ..
     } = proof;
 
-    // Let the challenge be the hash of the transcript
-    let c: G::ScalarField = hash_to_field(&to_bytes![HL_DOMAIN_STR, us, g1, g2, g3, com].unwrap());
+    // Update the transcript
+    transcript.append_message(b"HL domain", HL_DOMAIN_STR);
+    transcript.append_message(b"us", &to_bytes!(us).unwrap());
+    transcript.append_message(b"g1", &to_bytes!(g1).unwrap());
+    transcript.append_message(b"g2", &to_bytes!(g2).unwrap());
+    transcript.append_message(b"g3", &to_bytes!(g3).unwrap());
+    transcript.append_message(b"com", &to_bytes!(com).unwrap());
+
+    // Get a challenge from the transcript hash
+    let c: G::ScalarField = get_field_chal(b"c", transcript);
 
     // Check that com == (rG₁+sᵢG₂+tᵢG₃+cUᵢ)_{i=1}^k
     for (((com_val, s), t), u) in com
@@ -117,11 +144,11 @@ where
         let derived_val = g1.mul(&resp_r) + g2.mul(&s) + g3.mul(&t) + u.mul(&c);
         // It doesn't matter that this isn't constant time. This is a public-verifier proof.
         if com_val != &derived_val {
-            return Err(());
+            return false;
         }
     }
 
-    Ok(())
+    true
 }
 
 #[test]
@@ -146,10 +173,33 @@ fn test_hl_correctness() {
     let u1 = g1.mul(&w) + g2.mul(&x1) + g3.mul(&y1);
     let u2 = g1.mul(&w) + g2.mul(&x2) + g3.mul(&y2);
 
-    // Prove the relation and ensure that it verifies
+    // Collect the variables
     let us = &[u1, u2];
     let xs = &[x1, x2];
     let ys = &[y1, y2];
-    let proof = prove_hl(&mut rng, us, &g1, &g2, &g3, &w, xs, ys);
-    assert!(verify_hl(&proof, us, &g1, &g2, &g3).is_ok());
+
+    // Make an empty transcript for proving, and prove the relation
+    let mut proving_transcript = Transcript::new(b"test_hl_correctness");
+    let proof = prove_hl(
+        &mut rng,
+        &mut proving_transcript,
+        us,
+        &g1,
+        &g2,
+        &g3,
+        &w,
+        xs,
+        ys,
+    );
+
+    // Now make an empty transcript for verifying, and verify the relation
+    let mut verifying_transcript = Transcript::new(b"test_hl_correctness");
+    assert!(verify_hl(
+        &mut verifying_transcript,
+        &proof,
+        us,
+        &g1,
+        &g2,
+        &g3
+    ));
 }

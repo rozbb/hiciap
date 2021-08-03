@@ -12,6 +12,7 @@ use ark_groth16::{self, VerifyingKey as CircuitVerifyingKey};
 use ark_ip_proofs::tipa::VerifierSRS;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_std::rand::{CryptoRng, RngCore};
+use merlin::Transcript;
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct LinkedHiciapProofs<P: PairingEngine> {
@@ -51,8 +52,10 @@ where
     let z1s: Vec<P::Fr> = proof_data.iter().map(|t| t.1.z1).collect();
     let z3s: Vec<P::Fr> = proof_data.iter().map(|t| t.1.z3).collect();
 
+    let mut transcript = Transcript::new(b"HiCIAP link");
     let hl_proof = prove_hl(
         rng,
+        &mut transcript,
         &coms,
         &gens[0],
         &gens[1],
@@ -75,7 +78,7 @@ pub fn hiciap_verify_linked<P: PairingEngine>(
     circuit_vks: &[CircuitVerifyingKey<P>],
     all_verifier_inputs: &[VerifierInputs<P>],
     proofs: &LinkedHiciapProofs<P>,
-) -> Result<(), HiciapError> {
+) -> Result<bool, HiciapError> {
     let LinkedHiciapProofs {
         hiciap_proofs,
         hl_proof,
@@ -86,8 +89,18 @@ pub fn hiciap_verify_linked<P: PairingEngine>(
     // in HiCIAP.
     let coms: Vec<P::G1Projective> = hiciap_proofs.iter().map(|t| t.com_a0).collect();
     let gens = get_pedersen_generators(3);
-    verify_hl(hl_proof, &coms, &gens[0], &gens[1], &gens[2])
-        .map_err(|_| HiciapError::VerificationFailed)?;
+
+    let mut transcript = Transcript::new(b"HiCIAP link");
+    if !verify_hl(
+        &mut transcript,
+        hl_proof,
+        &coms,
+        &gens[0],
+        &gens[1],
+        &gens[2],
+    ) {
+        return Err(HiciapError::VerificationFailed);
+    }
 
     // Now check the HiCIAP proofs
     all_verifier_inputs
@@ -101,5 +114,5 @@ pub fn hiciap_verify_linked<P: PairingEngine>(
             },
         )
         .reduce(Result::and)
-        .unwrap()
+        .expect("hiciap_verify_linked expects non-empty arguments")
 }
