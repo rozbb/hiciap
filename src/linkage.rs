@@ -1,5 +1,5 @@
 use crate::{
-    hiciap::{hiciap_verify, HiciapProof, HiddenInputOpening, VerifierInputs},
+    hiciap::{hiciap_verify, HiciapProof, HiddenInputOpening, VerifierCtx},
     hl::{prove_hl, verify_hl, HlProof},
     util::get_pedersen_generators,
     HiciapError,
@@ -8,19 +8,16 @@ use crate::{
 use std::io::{Read, Write};
 
 use ark_ec::PairingEngine;
-use ark_groth16::{self, VerifyingKey as CircuitVerifyingKey};
-use ark_ip_proofs::tipa::VerifierSRS;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_std::rand::{CryptoRng, RngCore};
 use merlin::Transcript;
 
+/// A proof that a set of HiCIAP proofs are linked
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
-pub struct LinkedHiciapProofs<P: PairingEngine> {
-    hiciap_proofs: Vec<HiciapProof<P>>,
-    hl_proof: HlProof<P::G1Projective>,
-}
+pub struct LinkageProof<P: PairingEngine>(HlProof<P::G1Projective>);
 
-/// Links together several HiCIAP proofs, all of which share the same first hidden input
+/// Computes a proof that all the given HiCIAP proofs share the same hidden input. Note:
+/// verification of the proof is sensitive to the order of the inputs.
 ///
 /// Panics
 /// ======
@@ -28,7 +25,7 @@ pub struct LinkedHiciapProofs<P: PairingEngine> {
 pub fn hiciap_link<P, R>(
     rng: &mut R,
     proof_data: &[&(HiciapProof<P>, HiddenInputOpening<P>)],
-) -> LinkedHiciapProofs<P>
+) -> LinkageProof<P>
 where
     P: PairingEngine,
     R: CryptoRng + RngCore,
@@ -65,24 +62,21 @@ where
         &z3s,
     );
 
-    // Now return the HiCIAP + Linkage proofs
-    let hiciap_proofs: Vec<HiciapProof<P>> = proof_data.iter().map(|t| &t.0).cloned().collect();
-    LinkedHiciapProofs {
-        hiciap_proofs,
-        hl_proof,
-    }
+    LinkageProof(hl_proof)
 }
 
+/// Verifies that the given HiCIAP proofs are valid and share a common input. `ads` contains the
+/// associated data of each proof.
 pub fn hiciap_verify_linked<P: PairingEngine>(
-    ip_verifier_srss: &[VerifierSRS<P>],
-    circuit_vks: &[CircuitVerifyingKey<P>],
-    all_verifier_inputs: &[VerifierInputs<P>],
-    proofs: &LinkedHiciapProofs<P>,
+    ctxs: &[VerifierCtx<P>],
+    hiciap_proofs: &[HiciapProof<P>],
+    linkage_proof: &LinkageProof<P>,
 ) -> Result<bool, HiciapError> {
-    let LinkedHiciapProofs {
-        hiciap_proofs,
-        hl_proof,
-    } = proofs;
+    assert_eq!(
+        ctxs.len(),
+        hiciap_proofs.len(),
+        "# verif contexts must be equal to # proofs"
+    );
 
     // Check the HL proof first.
     // Get the hidden wire commitments and 3 generators. These are the same 3 Pedersen bases used
@@ -93,7 +87,7 @@ pub fn hiciap_verify_linked<P: PairingEngine>(
     let mut transcript = Transcript::new(b"HiCIAP link");
     if !verify_hl(
         &mut transcript,
-        hl_proof,
+        &linkage_proof.0,
         &coms,
         &gens[0],
         &gens[1],
@@ -103,16 +97,12 @@ pub fn hiciap_verify_linked<P: PairingEngine>(
     }
 
     // Now check the HiCIAP proofs
-    all_verifier_inputs
-        .iter()
-        .zip(hiciap_proofs.iter())
-        .zip(circuit_vks.iter())
-        .zip(ip_verifier_srss.iter())
-        .map(
-            |(((verifier_inputs, proof), circuit_vk), ip_verifier_srs)| {
-                hiciap_verify(&ip_verifier_srs, &circuit_vk, verifier_inputs, proof)
-            },
-        )
-        .reduce(Result::and)
-        .expect("hiciap_verify_linked expects non-empty arguments")
+    for (ctx, proof) in ctxs.iter().zip(hiciap_proofs.iter()) {
+        // Check the proof
+        if !hiciap_verify(ctx, proof)? {
+            return Err(HiciapError::VerificationFailed);
+        }
+    }
+
+    Ok(true)
 }

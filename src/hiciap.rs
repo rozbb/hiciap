@@ -186,7 +186,8 @@ fn masking_set(logn: u32) -> Vec<usize> {
 // TODO: Automatically pad out the inputs
 // TODO: Figure out what gets mutated if an error occurs
 /// Aggregates multiple proofs over the same circuit, also proving that each proof shares the same
-/// first witness value, `hidden_input`. This will rerandomize a subset of `proofs`.
+/// first witness value, `hidden_input`. `ad` is (non-secret) associated data that this proof will
+/// bound to. This function will rerandomize a subset of `proofs`.
 ///
 /// Panics
 /// ======
@@ -199,6 +200,7 @@ pub fn hiciap_prove<P, R>(
     proofs: &mut [Groth16Proof<P>],
     mut prepared_public_inputs: Option<&mut Vec<PreparedCircuitInput<P>>>,
     hidden_input: P::Fr,
+    ad: &[u8],
 ) -> Result<(HiciapProof<P>, HiddenInputOpening<P>), HiciapError>
 where
     P: PairingEngine,
@@ -313,6 +315,7 @@ where
     // This is the hashed transcript, used for the Fiat-Shamir transform. We update as the protocol
     // goes along
     let mut transcript = Transcript::new(HICIAP_DOMAIN_STR);
+    transcript.append_message(b"AD", ad);
     transcript.append_message(b"com_a0", &to_bytes!(com_a0).unwrap());
     transcript.append_message(b"com_a", &to_bytes!(com_a).unwrap());
     transcript.append_message(b"com_b", &to_bytes!(com_b).unwrap());
@@ -595,26 +598,43 @@ impl<'a, P: PairingEngine> VerifierInputs<'a, P> {
     }
 }
 
-/// Aggregates proofs which share the same verifying key
-pub fn hiciap_verify<P>(
-    hiciap_vk: &HiciapVerifKey<P>,
-    circuit_vk: &CircuitVerifyingKey<P>,
-    public_input_data: &VerifierInputs<P>,
-    proof: &HiciapProof<P>,
-) -> Result<bool, HiciapError>
+/// Contians all the info a verifier needs in order to verify a HiCIAP proof
+pub struct VerifierCtx<'a, P: PairingEngine> {
+    /// The HiCIAP srs
+    pub hiciap_vk: &'a HiciapVerifKey<P>,
+    /// The Groth16 verifier key
+    pub circuit_vk: &'a CircuitVerifyingKey<P>,
+    /// Public inputs to the underlying proofs
+    pub pub_input: VerifierInputs<'a, P>,
+    /// Associated data bound to this HiCIAP proof
+    pub associated_data: &'a [u8],
+}
+
+/// Aggregates proofs which share the same verifying key. `ad` is (non-secret) associated data the
+/// the proof is bound to.
+pub fn hiciap_verify<P>(ctx: &VerifierCtx<P>, proof: &HiciapProof<P>) -> Result<bool, HiciapError>
 where
     P: PairingEngine,
 {
+    // Unwrap the context
+    let VerifierCtx {
+        hiciap_vk,
+        circuit_vk,
+        pub_input,
+        associated_data,
+    } = ctx;
+
     // Get 2 generators in G₁ to check the Pedersen commitment to a₀
     let gens: Vec<P::G1Projective> = get_pedersen_generators(3);
     let (p1, p2, p3) = (gens[0], gens[1], gens[2]);
 
-    let num_proofs = public_input_data.num_proofs();
+    let num_proofs = pub_input.num_proofs();
     let com_inputs = proof.csm_data.as_ref().map(|d| &d.com_inputs);
 
     // This is the hashed transcript, used for the Fiat-Shamir transform. We update as the protocol
     // goes along
     let mut transcript = Transcript::new(HICIAP_DOMAIN_STR);
+    transcript.append_message(b"AD", associated_data);
     transcript.append_message(b"com_a0", &to_bytes!(proof.com_a0).unwrap());
     transcript.append_message(b"com_a", &to_bytes!(proof.com_a).unwrap());
     transcript.append_message(b"com_b", &to_bytes!(proof.com_b).unwrap());
@@ -712,7 +732,7 @@ where
 
     // If CSM data is given and we have an input commitment, verify the given MIPP proof.
     // Otherwise, compute agg_inputs yourself.
-    let agg_inputs = match public_input_data {
+    let agg_inputs = match pub_input {
         VerifierInputs::Com(com_inputs, _) => {
             if let Some(ref csm_data) = proof.csm_data {
                 // Check that the input commitment matches our input commitment
@@ -784,6 +804,7 @@ mod test {
         // Fix all the constants
         let num_proofs = 2usize.pow(7) - 2;
         let num_extra_circuit_inputs = 10;
+        let associated_data = b"test_hiciap_correctness";
 
         // Generate all the (short) common random strings
         let hiciap_pk = hiciap_setup(&mut rng, num_proofs).unwrap();
@@ -822,13 +843,21 @@ mod test {
             &mut groth16_proofs,
             Some(&mut prepared_public_inputs),
             hidden_input,
+            associated_data,
         )
         .unwrap();
 
-        // Now verify using CSM as well
+        // Now verify using CSM as well. First collect and compress the inputs
         let mut verifier_inputs: VerifierInputs<P> = (&mut prepared_public_inputs).into();
         verifier_inputs.compress(&hiciap_pk).unwrap();
-        assert!(hiciap_verify(&hiciap_vk, &circuit_vk, &verifier_inputs, &hiciap_proof).unwrap());
+        // Now collect everything for the verifier's context
+        let ctx = VerifierCtx {
+            hiciap_vk: &hiciap_vk,
+            circuit_vk: &circuit_vk,
+            pub_input: verifier_inputs,
+            associated_data: &*associated_data,
+        };
+        assert!(hiciap_verify(&ctx, &hiciap_proof,).unwrap());
     }
 }
 
