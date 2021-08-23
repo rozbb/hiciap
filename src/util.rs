@@ -1,26 +1,48 @@
 use std::io::Write;
 
 use ark_ec::group::Group;
-use ark_ff::Field;
-use ark_std::rand::SeedableRng;
-use merlin::Transcript;
+use ark_ff::PrimeField;
+use ark_serialize::CanonicalSerialize;
+use ark_std::rand::{rngs::StdRng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 // A nothing-up-my-sleeve seed for generating Pedersen bases
 const PEDERSEN_SEED: &[u8] = b"HiCIAP-gen-pedersen";
 
-/// Uses the given protocol transcript to create a challenge field element
-pub(crate) fn get_field_chal<F>(label: &'static [u8], transcript: &mut Transcript) -> F
-where
-    F: Field,
-{
-    // Hash the transcript into a 256 bit RNG seed
-    let mut seed = [0u8; 32];
-    transcript.challenge_bytes(label, &mut seed);
+// Convenience functions for generateing Fiat-Shamir challenges
+pub(crate) trait TranscriptProtocol {
+    /// Appends a CanonicalSerialize-able element to the transcript. Panics on serialization error.
+    fn append_serializable<S>(&mut self, label: &'static [u8], val: &S)
+    where
+        S: CanonicalSerialize + ?Sized;
 
-    // Use the seed to get a random field element
-    let mut seeded_rng = ChaCha20Rng::from_seed(seed.into());
-    F::rand(&mut seeded_rng)
+    /// Produces a pseudorandom field element from the current transcript
+    fn challenge_scalar<F: PrimeField>(&mut self, label: &'static [u8]) -> F;
+}
+
+impl TranscriptProtocol for merlin::Transcript {
+    /// Appends a CanonicalSerialize-able element to the transcript. Panics on serialization error.
+    fn append_serializable<S>(&mut self, label: &'static [u8], val: &S)
+    where
+        S: CanonicalSerialize + ?Sized,
+    {
+        // Serialize the input and give it to the transcript
+        let mut buf = Vec::new();
+        val.serialize(&mut buf)
+            .expect("serialization error in transcript");
+        self.append_message(label, &buf);
+    }
+
+    /// Produces a pseudorandom field element from the current transcript
+    fn challenge_scalar<F: PrimeField>(&mut self, label: &'static [u8]) -> F {
+        // Fill a buf with random bytes
+        let mut buf = <<StdRng as SeedableRng>::Seed as Default>::default();
+        self.challenge_bytes(label, &mut buf);
+
+        // Use the buf to make an RNG. Then use that RNG to generate a field element
+        let mut rng = StdRng::from_seed(buf);
+        F::rand(&mut rng)
+    }
 }
 
 /// Returns `num_gens` many deterministic unrelated group elements. This is used to construct

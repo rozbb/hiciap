@@ -1,11 +1,13 @@
-use crate::util::get_field_chal;
+use crate::util::TranscriptProtocol;
 
 use std::io::{Read, Write};
 
 use ark_ec::group::Group;
-use ark_ff::{to_bytes, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
-use ark_std::rand::{CryptoRng, Rng};
+use ark_std::{
+    rand::{CryptoRng, Rng},
+    UniformRand,
+};
 use merlin::Transcript;
 
 const HWW_DOMAIN_STR: &[u8] = b"HWW";
@@ -45,6 +47,9 @@ where
     G: Group + CanonicalSerialize + CanonicalDeserialize,
     R: CryptoRng + Rng,
 {
+    // Domain-separate this protocol
+    transcript.append_message(b"dom-sep", HWW_DOMAIN_STR);
+
     // Make sure the statement is true
     assert_eq!(u, &(g1.mul(w) + g2.mul(x) + g3.mul(y)));
     assert_eq!(v, &(g4.mul(w) + g5.mul(x)));
@@ -62,19 +67,17 @@ where
     );
 
     // Update the transcript
-    transcript.append_message(b"HWW domain", HWW_DOMAIN_STR);
-    transcript.append_message(b"u", &to_bytes!(u).unwrap());
-    transcript.append_message(b"v", &to_bytes!(v).unwrap());
-    transcript.append_message(b"g1", &to_bytes!(g1).unwrap());
-    transcript.append_message(b"g2", &to_bytes!(g2).unwrap());
-    transcript.append_message(b"g3", &to_bytes!(g3).unwrap());
-    transcript.append_message(b"g4", &to_bytes!(g4).unwrap());
-    transcript.append_message(b"g5", &to_bytes!(g5).unwrap());
-    transcript.append_message(b"com.0", &to_bytes!(com.0).unwrap());
-    transcript.append_message(b"com.1", &to_bytes!(com.1).unwrap());
+    transcript.append_serializable(b"u", u);
+    transcript.append_serializable(b"v", v);
+    transcript.append_serializable(b"g1", g1);
+    transcript.append_serializable(b"g2", g2);
+    transcript.append_serializable(b"g3", g3);
+    transcript.append_serializable(b"g4", g4);
+    transcript.append_serializable(b"g5", g5);
+    transcript.append_serializable(b"com", &com);
 
     // Get a challenge from the transcript hash
-    let c: G::ScalarField = get_field_chal(b"c", transcript);
+    let c: G::ScalarField = transcript.challenge_scalar(b"c");
 
     // Respond with (r₁, r₃, r₃) = (α-cw, β-cx, γ-cz)
     let resp = (alpha - &(c * w), beta - &(c * x), gamma - &(c * y));
@@ -99,22 +102,23 @@ pub(crate) fn verify_hww<G>(
 where
     G: Group + CanonicalSerialize + CanonicalDeserialize,
 {
+    // Domain-separate this protocol
+    transcript.append_message(b"dom-sep", HWW_DOMAIN_STR);
+
     let com = proof.com;
 
     // Update the transcript
-    transcript.append_message(b"HWW domain", HWW_DOMAIN_STR);
-    transcript.append_message(b"u", &to_bytes!(u).unwrap());
-    transcript.append_message(b"v", &to_bytes!(v).unwrap());
-    transcript.append_message(b"g1", &to_bytes!(g1).unwrap());
-    transcript.append_message(b"g2", &to_bytes!(g2).unwrap());
-    transcript.append_message(b"g3", &to_bytes!(g3).unwrap());
-    transcript.append_message(b"g4", &to_bytes!(g4).unwrap());
-    transcript.append_message(b"g5", &to_bytes!(g5).unwrap());
-    transcript.append_message(b"com.0", &to_bytes!(com.0).unwrap());
-    transcript.append_message(b"com.1", &to_bytes!(com.1).unwrap());
+    transcript.append_serializable(b"u", u);
+    transcript.append_serializable(b"v", v);
+    transcript.append_serializable(b"g1", g1);
+    transcript.append_serializable(b"g2", g2);
+    transcript.append_serializable(b"g3", g3);
+    transcript.append_serializable(b"g4", g4);
+    transcript.append_serializable(b"g5", g5);
+    transcript.append_serializable(b"com", &com);
 
     // Get a challenge from the transcript hash
-    let c: G::ScalarField = get_field_chal(b"c", transcript);
+    let c: G::ScalarField = transcript.challenge_scalar(b"c");
 
     // Check that com == (r₁G₁+r₂G₂+r₃G₃+cU,  r₁G₄+r₂G₅+cV)
     let (r1, r2, r3) = proof.resp;

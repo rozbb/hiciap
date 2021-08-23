@@ -68,7 +68,7 @@ where
 /// Verifies that the given HiCIAP proofs are valid and share a common input. `ads` contains the
 /// associated data of each proof.
 pub fn hiciap_verify_linked<P: PairingEngine>(
-    ctxs: &[VerifierCtx<P>],
+    ctxs: &mut [VerifierCtx<P>],
     hiciap_proofs: &[HiciapProof<P>],
     linkage_proof: &LinkageProof<P>,
 ) -> Result<bool, HiciapError> {
@@ -97,7 +97,7 @@ pub fn hiciap_verify_linked<P: PairingEngine>(
     }
 
     // Now check the HiCIAP proofs
-    for (ctx, proof) in ctxs.iter().zip(hiciap_proofs.iter()) {
+    for (ctx, proof) in ctxs.iter_mut().zip(hiciap_proofs.iter()) {
         // Check the proof
         if !hiciap_verify(ctx, proof)? {
             return Err(HiciapError::VerificationFailed);

@@ -1,6 +1,6 @@
 use crate::{
     hww::{prove_hww, verify_hww, HwwProof},
-    util::{get_field_chal, get_pedersen_generators},
+    util::{get_pedersen_generators, TranscriptProtocol},
     HiciapError,
 };
 
@@ -11,7 +11,7 @@ use ark_dh_commitments::{
     identity::{HomomorphicPlaceholderValue, IdentityCommitment, IdentityOutput},
 };
 use ark_ec::{group::Group, msm::VariableBaseMSM, AffineCurve, PairingEngine, ProjectiveCurve};
-use ark_ff::{to_bytes, Field, One, PrimeField, UniformRand, Zero};
+use ark_ff::{Field, One, PrimeField, Zero};
 use ark_groth16::{self, Proof as Groth16Proof, VerifyingKey as CircuitVerifyingKey};
 use ark_inner_products::{
     ExtensionFieldElement, InnerProduct, MultiexponentiationInnerProduct, PairingInnerProduct,
@@ -24,7 +24,10 @@ use ark_ip_proofs::{
     Error,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
-use ark_std::rand::{CryptoRng, Rng};
+use ark_std::{
+    rand::{CryptoRng, Rng},
+    UniformRand,
+};
 use merlin::Transcript;
 use rayon::prelude::*;
 
@@ -186,8 +189,7 @@ fn masking_set(logn: u32) -> Vec<usize> {
 // TODO: Automatically pad out the inputs
 // TODO: Figure out what gets mutated if an error occurs
 /// Aggregates multiple proofs over the same circuit, also proving that each proof shares the same
-/// first witness value, `hidden_input`. `ad` is (non-secret) associated data that this proof will
-/// bound to. This function will rerandomize a subset of `proofs`.
+/// first witness value, `hidden_input`. This function will rerandomize a subset of `proofs`.
 ///
 /// Panics
 /// ======
@@ -195,17 +197,20 @@ fn masking_set(logn: u32) -> Vec<usize> {
 /// proofs.len()`.
 pub fn hiciap_prove<P, R>(
     rng: &mut R,
+    transcript: &mut Transcript,
     hiciap_pk: &HiciapProvingKey<P>,
     circuit_vk: &CircuitVerifyingKey<P>,
     proofs: &mut [Groth16Proof<P>],
     mut prepared_public_inputs: Option<&mut Vec<PreparedCircuitInput<P>>>,
     hidden_input: P::Fr,
-    ad: &[u8],
 ) -> Result<(HiciapProof<P>, HiddenInputOpening<P>), HiciapError>
 where
     P: PairingEngine,
     R: CryptoRng + Rng,
 {
+    // Domain-separate this protocol
+    transcript.append_message(b"dom-sep", HICIAP_DOMAIN_STR);
+
     let num_proofs = proofs.len();
 
     // HiCIAP is only implemented for 2-minus-power-of-two many proofs. Further, HiCIAP is only
@@ -314,17 +319,15 @@ where
 
     // This is the hashed transcript, used for the Fiat-Shamir transform. We update as the protocol
     // goes along
-    let mut transcript = Transcript::new(HICIAP_DOMAIN_STR);
-    transcript.append_message(b"AD", ad);
-    transcript.append_message(b"com_a0", &to_bytes!(com_a0).unwrap());
-    transcript.append_message(b"com_a", &to_bytes!(com_a).unwrap());
-    transcript.append_message(b"com_b", &to_bytes!(com_b).unwrap());
-    transcript.append_message(b"com_c", &to_bytes!(com_c).unwrap());
-    transcript.append_message(b"com_inputs", &to_bytes!(com_inputs).unwrap());
+    transcript.append_serializable(b"com_a0", &com_a0);
+    transcript.append_serializable(b"com_a", &com_a);
+    transcript.append_serializable(b"com_b", &com_b);
+    transcript.append_serializable(b"com_c", &com_c);
+    transcript.append_serializable(b"com_inputs", &com_inputs);
 
     // Random linear combination of proofs
 
-    let r = get_field_chal(b"r", &mut transcript);
+    let r: P::Fr = transcript.challenge_scalar(b"r");
     let r_vec = structured_scalar_power(num_proofs + 2, &r);
 
     let a_r = a
@@ -348,8 +351,8 @@ where
     };
 
     // Update the transcript
-    transcript.append_message(b"agg_c", &to_bytes!(agg_c).unwrap());
-    transcript.append_message(b"agg_inputs", &to_bytes!(agg_inputs).unwrap());
+    transcript.append_serializable(b"agg_c", &agg_c);
+    transcript.append_serializable(b"agg_inputs", &agg_inputs);
 
     // The hidden common input commitment is
     //     (z₁rⁿ)·G + Σ_{i=0}^{n-1} (hidden_input · rⁱ) · W_{i,1}
@@ -382,12 +385,12 @@ where
         let hidden_wire_com = blinding_factor + &wire_val_sum;
 
         // Update the transcript
-        transcript.append_message(b"hidden_wire_com", &to_bytes!(hidden_wire_com).unwrap());
+        transcript.append_serializable(b"hidden_wire_com", &hidden_wire_com);
 
         // Construct the proof of well-formedness wrt the commitment to a₀
         let proof = prove_hww(
             rng,
-            &mut transcript,
+            transcript,
             &com_a0,
             &hidden_wire_com,
             &p1,
@@ -436,11 +439,11 @@ where
         let com_q = blinded_com(&q, &ck_1, &rho)?;
 
         // Update the transcript for the upcoming MIPP proof
-        transcript.append_message(b"agg_q", &to_bytes!(agg_q).unwrap());
-        transcript.append_message(b"com_q", &to_bytes!(com_q).unwrap());
+        transcript.append_serializable(b"agg_q", &agg_q);
+        transcript.append_serializable(b"com_q", &com_q);
 
         // Generate a challenge by hashing the transcript so far
-        let hide_mipp_chal: P::Fr = get_field_chal(b"hide_mipp_chal", &mut transcript);
+        let hide_mipp_chal: P::Fr = transcript.challenge_scalar(b"hide_mipp_chal");
 
         // ρ' := chal·z₄ + ρ
         // C' := chal·C + Q
@@ -606,13 +609,17 @@ pub struct VerifierCtx<'a, P: PairingEngine> {
     pub circuit_vk: &'a CircuitVerifyingKey<P>,
     /// Public inputs to the underlying proofs
     pub pub_input: VerifierInputs<'a, P>,
-    /// Associated data bound to this HiCIAP proof
-    pub associated_data: &'a [u8],
+    /// The protocol transcript up to this point (if you don't know what this is, use
+    /// `Transcript::new("your-label-here")`)
+    pub verif_transcript: Transcript,
 }
 
 /// Aggregates proofs which share the same verifying key. `ad` is (non-secret) associated data the
 /// the proof is bound to.
-pub fn hiciap_verify<P>(ctx: &VerifierCtx<P>, proof: &HiciapProof<P>) -> Result<bool, HiciapError>
+pub fn hiciap_verify<P>(
+    ctx: &mut VerifierCtx<P>,
+    proof: &HiciapProof<P>,
+) -> Result<bool, HiciapError>
 where
     P: PairingEngine,
 {
@@ -621,28 +628,30 @@ where
         hiciap_vk,
         circuit_vk,
         pub_input,
-        associated_data,
+        verif_transcript,
     } = ctx;
+
+    // Domain-separate this protocol
+    let transcript = verif_transcript;
+    transcript.append_message(b"dom-sep", HICIAP_DOMAIN_STR);
 
     // Get 2 generators in G₁ to check the Pedersen commitment to a₀
     let gens: Vec<P::G1Projective> = get_pedersen_generators(3);
     let (p1, p2, p3) = (gens[0], gens[1], gens[2]);
 
     let num_proofs = pub_input.num_proofs();
-    let com_inputs = proof.csm_data.as_ref().map(|d| &d.com_inputs);
+    let com_inputs = proof.csm_data.as_ref().map(|d| d.com_inputs.clone());
 
     // This is the hashed transcript, used for the Fiat-Shamir transform. We update as the protocol
     // goes along
-    let mut transcript = Transcript::new(HICIAP_DOMAIN_STR);
-    transcript.append_message(b"AD", associated_data);
-    transcript.append_message(b"com_a0", &to_bytes!(proof.com_a0).unwrap());
-    transcript.append_message(b"com_a", &to_bytes!(proof.com_a).unwrap());
-    transcript.append_message(b"com_b", &to_bytes!(proof.com_b).unwrap());
-    transcript.append_message(b"com_c", &to_bytes!(proof.com_c).unwrap());
-    transcript.append_message(b"com_inputs", &to_bytes!(com_inputs).unwrap());
+    transcript.append_serializable(b"com_a0", &proof.com_a0);
+    transcript.append_serializable(b"com_a", &proof.com_a);
+    transcript.append_serializable(b"com_b", &proof.com_b);
+    transcript.append_serializable(b"com_c", &proof.com_c);
+    transcript.append_serializable(b"com_inputs", &com_inputs);
 
     // Random linear combination of proofs
-    let r = get_field_chal(b"r", &mut transcript);
+    let r = transcript.challenge_scalar(b"r");
 
     // Check that com_a and com_b represent commitments to A, B such that Aʳ * B = ip_ab where (*)
     // represents an inner pairing product operation, and Aʳ = Σ rᵢ·Aᵢ
@@ -662,13 +671,10 @@ where
     let r_sum = (r.pow(&[num_proofs as u64]) - &<P::Fr>::one()) / &(r.clone() - &<P::Fr>::one());
 
     // Update the transcript
-    let agg_inputs = proof.csm_data.as_ref().map(|d| &d.agg_inputs);
-    transcript.append_message(b"agg_c", &to_bytes!(proof.agg_c).unwrap());
-    transcript.append_message(b"agg_inputs", &to_bytes!(agg_inputs).unwrap());
-    transcript.append_message(
-        b"hidden_wire_com",
-        &to_bytes!(proof.hidden_wire_com).unwrap(),
-    );
+    let agg_inputs = proof.csm_data.as_ref().map(|d| d.agg_inputs.clone());
+    transcript.append_serializable(b"agg_c", &proof.agg_c);
+    transcript.append_serializable(b"agg_inputs", &agg_inputs);
+    transcript.append_serializable(b"hidden_wire_com", &proof.hidden_wire_com);
 
     // Check the well-formedness of the given hidden input commitment. Calculate the bases G₃, G₄
     // used in the HWW proof.
@@ -680,7 +686,7 @@ where
     let g2 = g.mul(r.pow(&[num_proofs as u64]).into_repr());
 
     if !verify_hww(
-        &mut transcript,
+        transcript,
         &proof.hidden_input_proof,
         &proof.com_a0,
         &proof.hidden_wire_com,
@@ -694,13 +700,13 @@ where
     }
 
     // Update the transcript
-    transcript.append_message(b"agg_q", &to_bytes!(proof.hide_mipp_proof_c.agg_q).unwrap());
-    transcript.append_message(b"com_q", &to_bytes!(proof.hide_mipp_proof_c.com_q).unwrap());
+    transcript.append_serializable(b"agg_q", &proof.hide_mipp_proof_c.agg_q);
+    transcript.append_serializable(b"com_q", &proof.hide_mipp_proof_c.com_q);
 
     // Check that com_c represents a C such that Cʳ = agg_c
     let tipa_proof_c_valid = {
         // Generate a challenge by hashing the transcript so far
-        let hide_mipp_chal: P::Fr = get_field_chal(b"hide_mipp_chal", &mut transcript);
+        let hide_mipp_chal: P::Fr = transcript.challenge_scalar(b"hide_mipp_chal");
 
         // Compute e(G^{-ρ'}, H) where H is some element from P::G2
         let g_neg_rho_prime = {
@@ -804,7 +810,7 @@ mod test {
         // Fix all the constants
         let num_proofs = 2usize.pow(7) - 2;
         let num_extra_circuit_inputs = 10;
-        let associated_data = b"test_hiciap_correctness";
+        let mut proof_transcript = Transcript::new(b"test_hiciap_correctness");
 
         // Generate all the (short) common random strings
         let hiciap_pk = hiciap_setup(&mut rng, num_proofs).unwrap();
@@ -838,26 +844,28 @@ mod test {
         // Compute a HiCIAP proof with CSM
         let (hiciap_proof, _) = hiciap_prove(
             &mut rng,
+            &mut proof_transcript,
             &hiciap_pk,
             &circuit_vk,
             &mut groth16_proofs,
             Some(&mut prepared_public_inputs),
             hidden_input,
-            associated_data,
         )
         .unwrap();
 
         // Now verify using CSM as well. First collect and compress the inputs
         let mut verifier_inputs: VerifierInputs<P> = (&mut prepared_public_inputs).into();
         verifier_inputs.compress(&hiciap_pk).unwrap();
+        // Make the verif transcript the same as the prover's
+        let verif_transcript = Transcript::new(b"test_hiciap_correctness");
         // Now collect everything for the verifier's context
-        let ctx = VerifierCtx {
+        let mut ctx = VerifierCtx {
             hiciap_vk: &hiciap_vk,
             circuit_vk: &circuit_vk,
             pub_input: verifier_inputs,
-            associated_data: &*associated_data,
+            verif_transcript,
         };
-        assert!(hiciap_verify(&ctx, &hiciap_proof,).unwrap());
+        assert!(hiciap_verify(&mut ctx, &hiciap_proof,).unwrap());
     }
 }
 

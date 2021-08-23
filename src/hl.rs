@@ -1,12 +1,14 @@
-use crate::util::get_field_chal;
+use crate::util::TranscriptProtocol;
 
 use core::iter;
 use std::io::{Read, Write};
 
 use ark_ec::group::Group;
-use ark_ff::{to_bytes, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
-use ark_std::rand::{CryptoRng, Rng};
+use ark_std::{
+    rand::{CryptoRng, Rng},
+    UniformRand,
+};
 use merlin::Transcript;
 
 const HL_DOMAIN_STR: &[u8] = b"HL";
@@ -52,6 +54,9 @@ where
         assert_eq!(u, &(g1.mul(w) + g2.mul(x) + g3.mul(y)));
     }
 
+    // Domain-separate this protocol
+    transcript.append_message(b"dom-sep", HL_DOMAIN_STR);
+
     let k = us.len();
 
     // Pick random α, (βᵢ,γᵢ)_{i=1}^k
@@ -71,15 +76,14 @@ where
         .collect();
 
     // Update the transcript
-    transcript.append_message(b"HL domain", HL_DOMAIN_STR);
-    transcript.append_message(b"us", &to_bytes!(us).unwrap());
-    transcript.append_message(b"g1", &to_bytes!(g1).unwrap());
-    transcript.append_message(b"g2", &to_bytes!(g2).unwrap());
-    transcript.append_message(b"g3", &to_bytes!(g3).unwrap());
-    transcript.append_message(b"com", &to_bytes!(com).unwrap());
+    transcript.append_serializable(b"us", us);
+    transcript.append_serializable(b"g1", g1);
+    transcript.append_serializable(b"g2", g2);
+    transcript.append_serializable(b"g3", g3);
+    transcript.append_serializable(b"com", &com);
 
     // Get a challenge from the transcript hash
-    let c: G::ScalarField = get_field_chal(b"c", transcript);
+    let c: G::ScalarField = transcript.challenge_scalar(b"c");
 
     // Respond with r = α-cw and ∀i (sᵢ, tᵢ) = (βᵢ-cxᵢ, γᵢ-cyᵢ)
     let resp_r = alpha - &(c * w);
@@ -115,6 +119,9 @@ pub fn verify_hl<G>(
 where
     G: Group + CanonicalSerialize + CanonicalDeserialize,
 {
+    // Domain-separate this protocol
+    transcript.append_message(b"dom-sep", HL_DOMAIN_STR);
+
     let HlProof {
         com,
         resp_r,
@@ -124,15 +131,14 @@ where
     } = proof;
 
     // Update the transcript
-    transcript.append_message(b"HL domain", HL_DOMAIN_STR);
-    transcript.append_message(b"us", &to_bytes!(us).unwrap());
-    transcript.append_message(b"g1", &to_bytes!(g1).unwrap());
-    transcript.append_message(b"g2", &to_bytes!(g2).unwrap());
-    transcript.append_message(b"g3", &to_bytes!(g3).unwrap());
-    transcript.append_message(b"com", &to_bytes!(com).unwrap());
+    transcript.append_serializable(b"us", us);
+    transcript.append_serializable(b"g1", g1);
+    transcript.append_serializable(b"g2", g2);
+    transcript.append_serializable(b"g3", g3);
+    transcript.append_serializable(b"com", com);
 
     // Get a challenge from the transcript hash
-    let c: G::ScalarField = get_field_chal(b"c", transcript);
+    let c: G::ScalarField = transcript.challenge_scalar(b"c");
 
     // Check that com == (rG₁+sᵢG₂+tᵢG₃+cUᵢ)_{i=1}^k
     for (((com_val, s), t), u) in com
