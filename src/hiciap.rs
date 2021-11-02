@@ -16,6 +16,7 @@ use ark_groth16::{self, Proof as Groth16Proof, VerifyingKey as CircuitVerifyingK
 use ark_inner_products::{
     ExtensionFieldElement, InnerProduct, MultiexponentiationInnerProduct, PairingInnerProduct,
 };
+use ark_ip_proofs::tipa;
 use ark_ip_proofs::{
     tipa::{
         structured_scalar_message::{structured_scalar_power, TIPAWithSSM, TIPAWithSSMProof},
@@ -31,13 +32,24 @@ use ark_std::{
 use merlin::Transcript;
 use rayon::prelude::*;
 
-pub use ark_ip_proofs::tipa::{VerifierSRS as HiciapVerifKey, SRS as HiciapProvingKey};
-
 const HICIAP_DOMAIN_STR: &[u8] = b"HiCIAP";
 
 // TODO: Update RIPP to use Merlin instead of their own Blake2 thing
 // The RIPP crates uses Blake2 for noninteractive protocol challenges
 type D = blake2::Blake2s;
+
+/// A public proving key for HiCIAP proofs
+#[derive(Clone)]
+pub struct HiciapProvingKey<P: PairingEngine>(tipa::SRS<P>);
+/// A succinct verification key for HiCIAP proofs
+#[derive(Clone)]
+pub struct HiciapVerifKey<P: PairingEngine>(tipa::VerifierSRS<P>);
+
+impl<'a, P: PairingEngine> From<&'a HiciapProvingKey<P>> for HiciapVerifKey<P> {
+    fn from(pk: &HiciapProvingKey<P>) -> HiciapVerifKey<P> {
+        HiciapVerifKey(pk.0.get_verifier_key())
+    }
+}
 
 /// A single group element representing all the public inputs to a circuit
 pub type PreparedCircuitInput<P> = <P as PairingEngine>::G1Projective;
@@ -143,7 +155,7 @@ where
     // There's a num_proofs + 2 elements in the A and B vectors in HiCIAP
     let srs_size = num_proofs + 2;
     let (srs, _) = PairingInnerProductAB::<P>::setup(rng, srs_size)?;
-    Ok(srs)
+    Ok(HiciapProvingKey(srs))
 }
 
 /// Helper function which computes e(blind, G₂) + (v * ck_right), where (*) denotes inner pairing
@@ -299,7 +311,7 @@ where
         buf
     };
 
-    let (ck_1, ck_2) = hiciap_pk.get_commitment_keys();
+    let (ck_1, ck_2) = hiciap_pk.0.get_commitment_keys();
 
     let com_a = PairingInnerProduct::<P>::inner_product(&a, &ck_1)?;
     let com_b = PairingInnerProduct::<P>::inner_product(&ck_2, &b)?;
@@ -420,7 +432,7 @@ where
     // Prove that com_a and com_b represent commitments to A, B such that Aʳ * B = ip_ab where (*)
     // represents an inner pairing product operation, and Aʳ = Σ rᵢ·Aᵢ
     let tipa_proof_ab = PairingInnerProductAB::prove_with_srs_shift(
-        &hiciap_pk,
+        &hiciap_pk.0,
         (&a_r, &b),
         (&ck_1_r, &ck_2, &HomomorphicPlaceholderValue),
         &r,
@@ -455,7 +467,7 @@ where
             .collect();
 
         let mipp_proof_c = MultiExpInnerProductC::prove_with_structured_scalar_message(
-            &hiciap_pk,
+            &hiciap_pk.0,
             (&c_prime, &r_vec),
             (&ck_1, &HomomorphicPlaceholderValue),
         )?;
@@ -471,7 +483,7 @@ where
     // If the client-side multiexponentiation optim is enabled, prove MIPP on the aggregated inputs
     let mipp_proof_agg_inputs = if use_csm {
         Some(MultiExpInnerProductC::prove_with_structured_scalar_message(
-            &hiciap_pk,
+            &hiciap_pk.0,
             (prepared_public_inputs.as_ref().unwrap(), &r_vec),
             (&ck_1, &HomomorphicPlaceholderValue),
         )?)
@@ -588,7 +600,7 @@ impl<'a, P: PairingEngine> VerifierInputs<'a, P> {
             // Commit to the inputs. That is, compute ck₁*preprocessed_public_inputs where (*)
             // is the inner pairing product operation.
             let num_proofs = preprocessed_public_inputs.len();
-            let (ck_1, _) = hiciap_pk.get_commitment_keys();
+            let (ck_1, _) = hiciap_pk.0.get_commitment_keys();
             let com = PairingInnerProduct::<P>::inner_product(
                 &preprocessed_public_inputs,
                 &ck_1[..num_proofs],
@@ -656,7 +668,7 @@ where
     // Check that com_a and com_b represent commitments to A, B such that Aʳ * B = ip_ab where (*)
     // represents an inner pairing product operation, and Aʳ = Σ rᵢ·Aᵢ
     let tipa_proof_ab_valid = PairingInnerProductAB::verify_with_srs_shift(
-        hiciap_vk,
+        &hiciap_vk.0,
         &HomomorphicPlaceholderValue,
         (
             &proof.com_a,
@@ -728,7 +740,7 @@ where
 
         // Verify MIPP wrt com', agg', and the given MIPP transcript
         MultiExpInnerProductC::verify_with_structured_scalar_message(
-            hiciap_vk,
+            &hiciap_vk.0,
             &HomomorphicPlaceholderValue,
             (&com_prime, &IdentityOutput(vec![agg_prime])),
             &r,
@@ -750,7 +762,7 @@ where
 
                 // Check that agg_inputs is correctly computed
                 MultiExpInnerProductC::verify_with_structured_scalar_message(
-                    hiciap_vk,
+                    &hiciap_vk.0,
                     &HomomorphicPlaceholderValue,
                     (
                         &csm_data.com_inputs,
@@ -814,7 +826,7 @@ mod test {
 
         // Generate all the (short) common random strings
         let hiciap_pk = hiciap_setup(&mut rng, num_proofs).unwrap();
-        let hiciap_vk = hiciap_pk.get_verifier_key();
+        let hiciap_vk = HiciapVerifKey::from(&hiciap_pk);
         let circuit_pk = gen_preimage_circuit_params(&mut rng, num_extra_circuit_inputs);
         let circuit_vk = &circuit_pk.vk;
 

@@ -6,9 +6,9 @@ edition = "2018"
 license = "MIT/Apache-2.0"
 
 [dependencies]
-ark-ip-proofs = { git = "https://github.com/arkworks-rs/ripp" }
-ark-dh-commitments = { git = "https://github.com/arkworks-rs/ripp" }
-ark-inner-products = { git = "https://github.com/arkworks-rs/ripp" }
+ark-ip-proofs = { git = "https://github.com/arkworks-rs/ripp", rev = "59d59d9" }
+ark-dh-commitments = { git = "https://github.com/arkworks-rs/ripp", rev = "59d59d9" }
+ark-inner-products = { git = "https://github.com/arkworks-rs/ripp", rev = "59d59d9" }
 ark-groth16 = "0.3"
 ark-serialize = { version = "0.3", default-features = false, features = [ "derive" ] }
 ark-std = { version = "0.3", default-features = false }
