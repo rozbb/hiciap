@@ -8,6 +8,8 @@ mod hww;
 pub mod linkage;
 mod util;
 
+pub use hiciap::*;
+
 #[cfg(test)]
 mod test_circuit;
 

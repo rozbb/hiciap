@@ -146,7 +146,10 @@ pub struct HideMipp<P: PairingEngine> {
 type Mipp<P> = MultiExpInnerProductCProof<P>;
 
 /// Constructs a short random string that's used as a commitment key in HiCIAP. Supports up to
-/// `num_proofs` many Groth16 proofs.
+/// `num_proofs` many Groth16 proofs. `num_proofs + 2` MUST be a power of 2, and at least 16.
+///
+/// # Panics
+/// Panics if `num_proofs + 2` is not power of 2 greater than or equal to 16.
 pub fn hiciap_setup<P, R>(rng: &mut R, num_proofs: usize) -> Result<HiciapProvingKey<P>, Error>
 where
     P: PairingEngine,
