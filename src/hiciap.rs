@@ -202,6 +202,8 @@ fn masking_set(logn: u32) -> Vec<usize> {
 // TODO: Figure out what gets mutated if an error occurs
 /// Aggregates multiple proofs over the same circuit, also proving that each proof shares the same
 /// first witness value, `hidden_input`. This function will rerandomize a subset of `proofs`.
+/// `transcript` is the protocol transcript up to this point (if you don't know what this is, use
+/// `Transcript::new("your-label-here")`).
 ///
 /// Panics
 /// ======
@@ -266,10 +268,10 @@ where
     let com_a0 = p1.mul(hidden_input.into_repr()) + p2.mul(z1.into_repr()) + p3.mul(z3.into_repr());
 
     // Add identities to the preprocessed proof inputs so that it's the appropriate length for MIPP
-    prepared_public_inputs.as_mut().map(|v| {
+    if let Some(ref mut v) = prepared_public_inputs {
         v.push(P::G1Projective::zero());
         v.push(P::G1Projective::zero());
-    });
+    }
 
     // 𝐀 = A_1 || ... || A_n || z₁·G₁ || z₂·G₁
     let a = {
@@ -374,7 +376,7 @@ where
     let (hidden_wire_com, hidden_input_proof) = {
         // Calculate (z₁rⁿ)·G
         let g = P::G1Projective::prime_subgroup_generator();
-        let g_coeff: P::Fr = z1 * &r_vec[num_proofs];
+        let g_coeff: P::Fr = z1 * r_vec[num_proofs];
         let blinding_factor = g.mul(g_coeff.into_repr());
 
         // Calculate wire_val_sum = Σ_{i=0}^{n-1} (hidden_input · rⁱ) · W_{i,1}. It's more
@@ -384,8 +386,8 @@ where
         // This is actually a partial result to the calculation of the above sum.
         let g1 = {
             let w1 = &circuit_vk.gamma_abc_g1[1];
-            let r_sum =
-                (r.pow(&[num_proofs as u64]) - &<P::Fr>::one()) / &(r.clone() - &<P::Fr>::one());
+            let one = <P::Fr>::one();
+            let r_sum = (r.pow(&[num_proofs as u64]) - one) / (r - one);
             w1.mul(r_sum.into_repr())
         };
         let wire_val_sum = g1.mul(hidden_input.into_repr());
@@ -394,7 +396,7 @@ where
         let g2 = g.mul(r_vec[num_proofs].into_repr());
 
         // Calculate the commitment (z₁r^{n+1})G + wire_val_sum
-        let hidden_wire_com = blinding_factor + &wire_val_sum;
+        let hidden_wire_com = blinding_factor + wire_val_sum;
 
         // Update the transcript
         transcript.append_serializable(b"hidden_wire_com", &hidden_wire_com);
@@ -503,7 +505,9 @@ where
     };
 
     // Undo the appending of 2 identity elems
-    prepared_public_inputs.map(|v| v.truncate(num_proofs));
+    if let Some(v) = prepared_public_inputs {
+        v.truncate(num_proofs)
+    }
 
     // Finally, save the opening to com_a0 so that it can be used in a linkage proof
     let hi_opening = HiddenInputOpening {
@@ -602,7 +606,7 @@ impl<'a, P: PairingEngine> VerifierInputs<'a, P> {
             let num_proofs = preprocessed_public_inputs.len();
             let (ck_1, _) = hiciap_pk.0.get_commitment_keys();
             let com = PairingInnerProduct::<P>::inner_product(
-                &preprocessed_public_inputs,
+                preprocessed_public_inputs,
                 &ck_1[..num_proofs],
             )?;
 
@@ -621,14 +625,16 @@ pub struct VerifierCtx<'a, P: PairingEngine> {
     pub circuit_vk: &'a CircuitVerifyingKey<P>,
     /// Public inputs to the underlying proofs
     pub pub_input: VerifierInputs<'a, P>,
-    /// The protocol transcript up to this point (if you don't know what this is, use
-    /// `Transcript::new("your-label-here")`)
-    pub verif_transcript: Transcript,
 }
 
 /// Aggregates proofs which share the same verifying key. `ad` is (non-secret) associated data the
-/// the proof is bound to.
-pub fn hiciap_verify<P>(ctx: &mut VerifierCtx<P>, proof: &HiciapProof<P>) -> Result<bool, Error>
+/// the proof is bound to. The state of `transcript` here must be identical to the state of
+/// `transcript` in `hiciap_prove` in order for this to verify correctly.
+pub fn hiciap_verify<P>(
+    ctx: &mut VerifierCtx<P>,
+    transcript: &mut Transcript,
+    proof: &HiciapProof<P>,
+) -> Result<bool, Error>
 where
     P: PairingEngine,
 {
@@ -637,11 +643,9 @@ where
         hiciap_vk,
         circuit_vk,
         pub_input,
-        verif_transcript,
     } = ctx;
 
     // Domain-separate this protocol
-    let transcript = verif_transcript;
     transcript.append_message(b"dom-sep", HICIAP_DOMAIN_STR);
 
     // Get 2 generators in G₁ to check the Pedersen commitment to a₀
@@ -677,10 +681,13 @@ where
     )?;
 
     // Σ_{i=0}^{n-2} rⁱ = (r^{n-1} - 1) / (r - 1)
-    let r_sum = (r.pow(&[num_proofs as u64]) - &<P::Fr>::one()) / &(r.clone() - &<P::Fr>::one());
+    let r_sum = {
+        let one = <P::Fr>::one();
+        (r.pow(&[num_proofs as u64]) - one) / (r - one)
+    };
 
     // Update the transcript
-    let agg_inputs = proof.csm_data.as_ref().map(|d| d.agg_inputs.clone());
+    let agg_inputs = proof.csm_data.as_ref().map(|d| d.agg_inputs);
     transcript.append_serializable(b"agg_c", &proof.agg_c);
     transcript.append_serializable(b"agg_inputs", &agg_inputs);
     transcript.append_serializable(b"hidden_wire_com", &proof.hidden_wire_com);
@@ -779,7 +786,7 @@ where
         VerifierInputs::List(prepared_public_inputs) => {
             let r_vec = structured_scalar_power(num_proofs + 2, &r);
             MultiexponentiationInnerProduct::<P::G1Projective>::inner_product(
-                &prepared_public_inputs,
+                prepared_public_inputs,
                 &r_vec[..num_proofs],
             )?
         }
@@ -866,15 +873,14 @@ mod test {
         let mut verifier_inputs: VerifierInputs<P> = (&mut prepared_public_inputs).into();
         verifier_inputs.compress(&hiciap_pk).unwrap();
         // Make the verif transcript the same as the prover's
-        let verif_transcript = Transcript::new(b"test_hiciap_correctness");
+        let mut verif_transcript = Transcript::new(b"test_hiciap_correctness");
         // Now collect everything for the verifier's context
         let mut ctx = VerifierCtx {
             hiciap_vk: &hiciap_vk,
             circuit_vk,
             pub_input: verifier_inputs,
-            verif_transcript,
         };
-        assert!(hiciap_verify(&mut ctx, &hiciap_proof,).unwrap());
+        assert!(hiciap_verify(&mut ctx, &mut verif_transcript, &hiciap_proof).unwrap());
     }
 }
 

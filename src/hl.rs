@@ -36,9 +36,7 @@ pub fn prove_hl<G, R>(
     rng: &mut R,
     transcript: &mut Transcript,
     us: &[G],
-    g1: &G,
-    g2: &G,
-    g3: &G,
+    basis: &[G; 3],
     w: &G::ScalarField,
     xs: &[G::ScalarField],
     ys: &[G::ScalarField],
@@ -47,6 +45,11 @@ where
     G: Group + CanonicalSerialize + CanonicalDeserialize,
     R: CryptoRng + Rng,
 {
+    // Destructure the basis
+    let g1 = &basis[0];
+    let g2 = &basis[1];
+    let g3 = &basis[2];
+
     // Make sure the statement is true
     assert_eq!(us.len(), xs.len());
     assert_eq!(xs.len(), ys.len());
@@ -112,13 +115,16 @@ pub fn verify_hl<G>(
     transcript: &mut Transcript,
     proof: &HlProof<G>,
     us: &[G],
-    g1: &G,
-    g2: &G,
-    g3: &G,
+    basis: &[G; 3],
 ) -> bool
 where
     G: Group + CanonicalSerialize + CanonicalDeserialize,
 {
+    // Destructure the basis
+    let g1 = &basis[0];
+    let g2 = &basis[1];
+    let g3 = &basis[2];
+
     // Domain-separate this protocol
     transcript.append_message(b"dom-sep", HL_DOMAIN_STR);
 
@@ -167,6 +173,7 @@ fn test_hl_correctness() {
     // Get some arbitrary generators and field elements
     let mut rng = ark_std::test_rng();
     let (g1, g2, g3) = (G::rand(&mut rng), G::rand(&mut rng), G::rand(&mut rng));
+    let basis = [g1, g2, g3];
     let (w, x1, y1, x2, y2) = (
         F::rand(&mut rng),
         F::rand(&mut rng),
@@ -186,26 +193,9 @@ fn test_hl_correctness() {
 
     // Make an empty transcript for proving, and prove the relation
     let mut proving_transcript = Transcript::new(b"test_hl_correctness");
-    let proof = prove_hl(
-        &mut rng,
-        &mut proving_transcript,
-        us,
-        &g1,
-        &g2,
-        &g3,
-        &w,
-        xs,
-        ys,
-    );
+    let proof = prove_hl(&mut rng, &mut proving_transcript, us, &basis, &w, xs, ys);
 
     // Now make an empty transcript for verifying, and verify the relation
     let mut verifying_transcript = Transcript::new(b"test_hl_correctness");
-    assert!(verify_hl(
-        &mut verifying_transcript,
-        &proof,
-        us,
-        &g1,
-        &g2,
-        &g3
-    ));
+    assert!(verify_hl(&mut verifying_transcript, &proof, us, &basis,));
 }
