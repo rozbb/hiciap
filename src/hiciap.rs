@@ -1,7 +1,7 @@
 use crate::{
     hww::{prove_hww, verify_hww, HwwProof},
     util::{get_pedersen_generators, TranscriptProtocol},
-    HiciapError,
+    Error,
 };
 
 use std::io::{Read, Write};
@@ -16,13 +16,10 @@ use ark_groth16::{self, Proof as Groth16Proof, VerifyingKey as CircuitVerifyingK
 use ark_inner_products::{
     ExtensionFieldElement, InnerProduct, MultiexponentiationInnerProduct, PairingInnerProduct,
 };
-use ark_ip_proofs::tipa;
-use ark_ip_proofs::{
-    tipa::{
-        structured_scalar_message::{structured_scalar_power, TIPAWithSSM, TIPAWithSSMProof},
-        TIPAProof, TIPA,
-    },
-    Error,
+use ark_ip_proofs::tipa::{
+    self,
+    structured_scalar_message::{structured_scalar_power, TIPAWithSSM, TIPAWithSSMProof},
+    TIPAProof, TIPA,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_std::{
@@ -92,7 +89,7 @@ type MultiExpInnerProductCProof<P> = TIPAWithSSMProof<
     D,
 >;
 
-/// The opening of a commitment to a hidden input (called com_{a_0} in the paper)
+/// The opening of a commitment to a hidden input
 #[derive(Clone)]
 pub struct HiddenInputOpening<P: PairingEngine> {
     pub(crate) hidden_input: <P as PairingEngine>::Fr,
@@ -218,7 +215,7 @@ pub fn hiciap_prove<P, R>(
     proofs: &mut [Groth16Proof<P>],
     mut prepared_public_inputs: Option<&mut Vec<PreparedCircuitInput<P>>>,
     hidden_input: P::Fr,
-) -> Result<(HiciapProof<P>, HiddenInputOpening<P>), HiciapError>
+) -> Result<(HiciapProof<P>, HiddenInputOpening<P>), Error>
 where
     P: PairingEngine,
     R: CryptoRng + Rng,
@@ -541,7 +538,7 @@ where
 pub fn prepare_circuit_input<P>(
     vk: &CircuitVerifyingKey<P>,
     proof_inputs: &[P::Fr],
-) -> Result<PreparedCircuitInput<P>, HiciapError>
+) -> Result<PreparedCircuitInput<P>, Error>
 where
     P: PairingEngine,
 {
@@ -597,7 +594,7 @@ impl<'a, P: PairingEngine> From<&'a mut Vec<PreparedCircuitInput<P>>> for Verifi
 impl<'a, P: PairingEngine> VerifierInputs<'a, P> {
     /// Computes the commitment to the given prepared public inputs. After this operation, this
     /// `VerifierInputs` can be used with `hiciap_verify` on CSM proofs for fast verification.
-    pub fn compress(&mut self, hiciap_pk: &HiciapProvingKey<P>) -> Result<(), HiciapError> {
+    pub fn compress(&mut self, hiciap_pk: &HiciapProvingKey<P>) -> Result<(), Error> {
         // If we're a list, commit to the list. Otherwise, we're already a commitment so do nothing
         if let VerifierInputs::List(preprocessed_public_inputs) = self {
             // Commit to the inputs. That is, compute ck₁*preprocessed_public_inputs where (*)
@@ -631,10 +628,7 @@ pub struct VerifierCtx<'a, P: PairingEngine> {
 
 /// Aggregates proofs which share the same verifying key. `ad` is (non-secret) associated data the
 /// the proof is bound to.
-pub fn hiciap_verify<P>(
-    ctx: &mut VerifierCtx<P>,
-    proof: &HiciapProof<P>,
-) -> Result<bool, HiciapError>
+pub fn hiciap_verify<P>(ctx: &mut VerifierCtx<P>, proof: &HiciapProof<P>) -> Result<bool, Error>
 where
     P: PairingEngine,
 {
@@ -760,7 +754,7 @@ where
                 // TODO: This is technically public inputs but it wouldn't hurt to make this
                 // constant time
                 if com_inputs != &csm_data.com_inputs {
-                    return Err(HiciapError::VerificationFailed);
+                    return Err(Error::VerificationFailed);
                 }
 
                 // Check that agg_inputs is correctly computed
@@ -779,7 +773,7 @@ where
             } else {
                 // Error: We have been given a commitment, but no CSM to use it on. We can't verify
                 // this proof
-                return Err(HiciapError::NoCsmAvailable);
+                return Err(Error::NoCsmAvailable);
             }
         }
         VerifierInputs::List(prepared_public_inputs) => {
@@ -800,7 +794,7 @@ where
     let p4 = P::pairing(proof.hidden_wire_com, circuit_vk.gamma_g2);
 
     // Ensure that Aʳ * B = Z where Z is the product of all the above factors
-    let ppe_valid = proof.ip_ab.0 == ((p1 * &p2) * &p3) * &p4;
+    let ppe_valid = proof.ip_ab.0 == (p1 * p2 * p3 * p4);
 
     Ok(tipa_proof_ab_valid && tipa_proof_c_valid && ppe_valid)
 }
@@ -853,7 +847,7 @@ mod test {
             .collect();
         let mut prepared_public_inputs: Vec<PreparedCircuitInput<P>> = groth16_proofs_and_inputs
             .iter()
-            .map(|e| prepare_circuit_input(&circuit_vk, &e.1).unwrap())
+            .map(|e| prepare_circuit_input(circuit_vk, &e.1).unwrap())
             .collect();
 
         // Compute a HiCIAP proof with CSM
@@ -861,7 +855,7 @@ mod test {
             &mut rng,
             &mut proof_transcript,
             &hiciap_pk,
-            &circuit_vk,
+            circuit_vk,
             &mut groth16_proofs,
             Some(&mut prepared_public_inputs),
             hidden_input,
@@ -876,7 +870,7 @@ mod test {
         // Now collect everything for the verifier's context
         let mut ctx = VerifierCtx {
             hiciap_vk: &hiciap_vk,
-            circuit_vk: &circuit_vk,
+            circuit_vk,
             pub_input: verifier_inputs,
             verif_transcript,
         };

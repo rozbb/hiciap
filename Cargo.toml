@@ -16,9 +16,10 @@ ark-crypto-primitives = "0.3"
 ark-ec = "0.3"
 ark-ff = "0.3"
 blake2 = "0.9"
-merlin = "3.0"
+merlin = "3"
 rand_chacha = "0.3"
 rayon = "1"
+thiserror = "1"
 
 [dev-dependencies]
 ark-bls12-381 = { version = "0.3", default-features = false, features = [ "curve" ] }

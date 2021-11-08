@@ -2,7 +2,7 @@ use crate::{
     hiciap::{hiciap_verify, HiciapProof, HiddenInputOpening, VerifierCtx},
     hl::{prove_hl, verify_hl, HlProof},
     util::get_pedersen_generators,
-    HiciapError,
+    Error,
 };
 
 use std::io::{Read, Write};
@@ -32,7 +32,7 @@ where
 {
     // Baseline checks: Make sure we have at least 1 proof, and make sure that every proof uses the
     // same common input
-    assert!(proof_data.len() != 0);
+    assert!(!proof_data.is_empty());
 
     let hidden_input = proof_data.first().unwrap().1.hidden_input;
     for opening in proof_data.iter().map(|t| &t.1) {
@@ -71,7 +71,7 @@ pub fn hiciap_verify_linked<P: PairingEngine>(
     ctxs: &mut [VerifierCtx<P>],
     hiciap_proofs: &[HiciapProof<P>],
     linkage_proof: &LinkageProof<P>,
-) -> Result<bool, HiciapError> {
+) -> Result<bool, Error> {
     assert_eq!(
         ctxs.len(),
         hiciap_proofs.len(),
@@ -93,14 +93,14 @@ pub fn hiciap_verify_linked<P: PairingEngine>(
         &gens[1],
         &gens[2],
     ) {
-        return Err(HiciapError::VerificationFailed);
+        return Err(Error::VerificationFailed);
     }
 
     // Now check the HiCIAP proofs
     for (ctx, proof) in ctxs.iter_mut().zip(hiciap_proofs.iter()) {
         // Check the proof
         if !hiciap_verify(ctx, proof)? {
-            return Err(HiciapError::VerificationFailed);
+            return Err(Error::VerificationFailed);
         }
     }
 
