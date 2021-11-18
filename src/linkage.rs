@@ -70,16 +70,9 @@ where
 /// separately.
 #[must_use]
 pub fn hiciap_verify_linkage<P: PairingEngine>(
-    ctxs: &mut [VerifierCtx<P>],
     hiciap_proofs: &[HiciapProof<P>],
     linkage_proof: &LinkageProof<P>,
 ) -> bool {
-    assert_eq!(
-        ctxs.len(),
-        hiciap_proofs.len(),
-        "# verif contexts must be equal to # proofs"
-    );
-
     // Check the HL proof first.
     // Get the hidden wire commitments and 3 generators. These are the same 3 Pedersen bases used
     // in HiCIAP.
