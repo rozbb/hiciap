@@ -1,5 +1,5 @@
 use crate::{
-    hiciap::{HiciapProof, HiddenInputOpening, VerifierCtx},
+    hiciap::{HiciapProof, HiddenInputOpening},
     hl::{prove_hl, verify_hl, HlProof},
     util::get_pedersen_generators,
 };
