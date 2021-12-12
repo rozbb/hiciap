@@ -123,15 +123,15 @@ pub struct HiciapProof<P: PairingEngine> {
     hidden_input_proof: HwwProof<P::G1Projective>,
     /// Transcript of a structured TIPP protocol execution
     tipa_proof_ab: PairingInnerProductABProof<P>,
-    /// Transcript of a HideMIPP_k protocol execution on C
-    hide_mipp_proof_c: HideMipp<P>,
+    /// Transcript of a HMIPP protocol execution on C
+    hmipp_proof_c: Hmipp<P>,
     /// Optional client-side multiexponentiation optimization
     csm_data: Option<CsmData<P>>,
 }
 
-/// Transcript of an execution of the HideMIPP protocol
+/// Transcript of an execution of the HMIPP protocol
 #[derive(CanonicalDeserialize, CanonicalSerialize, Clone)]
-pub struct HideMipp<P: PairingEngine> {
+pub struct Hmipp<P: PairingEngine> {
     // The names below correspond to the names in the paper
     com_q: ExtensionFieldElement<P>,
     agg_q: P::G1Projective,
@@ -436,7 +436,7 @@ where
     )?;
 
     // Prove that com_c represents a C such that Cʳ = agg_c
-    let hide_mipp_proof_c = {
+    let hmipp_proof_c = {
         // Make a vector of random elements
         // NOTE: HKR19 says this can actually be mostly 0s. You only need logarithmically many such
         // elements.
@@ -452,16 +452,16 @@ where
         transcript.append_serializable(b"com_q", &com_q);
 
         // Generate a challenge by hashing the transcript so far
-        let hide_mipp_chal: P::Fr = transcript.challenge_scalar(b"hide_mipp_chal");
+        let hmipp_chal: P::Fr = transcript.challenge_scalar(b"hmipp_chal");
 
         // Hide C by randomizing every element
         // ρ' := chal·z₄ + ρ
         // C' := chal·C + Q
-        let rho_prime = hide_mipp_chal * z4 + rho;
+        let rho_prime = hmipp_chal * z4 + rho;
         let c_prime: Vec<P::G1Projective> = c
             .iter()
             .zip(q.iter())
-            .map(|(c, q)| c.mul(&hide_mipp_chal) + q)
+            .map(|(c, q)| c.mul(&hmipp_chal) + q)
             .collect();
 
         let mipp_proof_c = MultiExpInnerProductC::prove_with_structured_scalar_message(
@@ -470,7 +470,7 @@ where
             (&ck_1, &HomomorphicPlaceholderValue),
         )?;
 
-        HideMipp {
+        Hmipp {
             com_q,
             agg_q,
             rho_prime,
@@ -521,7 +521,7 @@ where
         hidden_wire_com,
         hidden_input_proof,
         tipa_proof_ab,
-        hide_mipp_proof_c,
+        hmipp_proof_c,
         csm_data,
     };
 
@@ -712,18 +712,18 @@ where
     }
 
     // Update the transcript
-    transcript.append_serializable(b"agg_q", &proof.hide_mipp_proof_c.agg_q);
-    transcript.append_serializable(b"com_q", &proof.hide_mipp_proof_c.com_q);
+    transcript.append_serializable(b"agg_q", &proof.hmipp_proof_c.agg_q);
+    transcript.append_serializable(b"com_q", &proof.hmipp_proof_c.com_q);
 
     // Check that com_c represents a C such that Cʳ = agg_c
     let tipa_proof_c_valid = {
         // Generate a challenge by hashing the transcript so far
-        let hide_mipp_chal: P::Fr = transcript.challenge_scalar(b"hide_mipp_chal");
+        let hmipp_chal: P::Fr = transcript.challenge_scalar(b"hmipp_chal");
 
         // Compute e(G^{-ρ'}, H) where H is some element from P::G2
         let g_neg_rho_prime = {
             let g = P::G1Projective::prime_subgroup_generator();
-            g.mul((-proof.hide_mipp_proof_c.rho_prime).into_repr())
+            g.mul((-proof.hmipp_proof_c.rho_prime).into_repr())
         };
         let blinding_factor = {
             let g2elem: P::G2Projective = get_pedersen_generators(1)[0];
@@ -732,11 +732,11 @@ where
 
         // Compute the new commitment and aggregation that we'll run MIPP on
         let com_prime = ExtensionFieldElement(
-            proof.com_c.0.pow(hide_mipp_chal.into_repr())
-                * proof.hide_mipp_proof_c.com_q.0
+            proof.com_c.0.pow(hmipp_chal.into_repr())
+                * proof.hmipp_proof_c.com_q.0
                 * blinding_factor,
         );
-        let agg_prime = proof.agg_c.mul(hide_mipp_chal.into_repr()) + proof.hide_mipp_proof_c.agg_q;
+        let agg_prime = proof.agg_c.mul(hmipp_chal.into_repr()) + proof.hmipp_proof_c.agg_q;
 
         // Verify MIPP wrt com', agg', and the given MIPP transcript
         MultiExpInnerProductC::verify_with_structured_scalar_message(
@@ -744,7 +744,7 @@ where
             &HomomorphicPlaceholderValue,
             (&com_prime, &IdentityOutput(vec![agg_prime])),
             &r,
-            &proof.hide_mipp_proof_c.mipp_proof_c,
+            &proof.hmipp_proof_c.mipp_proof_c,
         )?
     };
 
