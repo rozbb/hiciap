@@ -180,20 +180,15 @@ where
 
 /// Given log(#proofs), return the indices of the proof elements we want to randomize
 fn masking_set(logn: u32) -> Vec<usize> {
-    // The 0-indexed masking set is
-    //     {0, 1, 2} ∪ {2^i-1, 2^i, 2^i+1}_{i=2}^{ℓ-1} ∪ {2^ℓ-3, 2^ℓ-4, 2^ℓ-5}
-    // where ℓ is log(n) and n is the number of proofs
-    let mut m = vec![0, 1, 2];
+    // The 0-indexed masking set 𝕄' is
+    //     {n-3} ∪ {2^k-2, 2^k-1, 2^k}_{k=2}^{ℓ-1}
+    // where ℓ is log2(n) and n is the CK size
+    let mut m = vec![2usize.pow(logn) - 3];
     for i in 2..logn {
+        m.push(2usize.pow(i) - 2);
         m.push(2usize.pow(i) - 1);
         m.push(2usize.pow(i));
-        m.push(2usize.pow(i) + 1);
     }
-    m.extend_from_slice(&[
-        2usize.pow(logn) - 3,
-        2usize.pow(logn) - 4,
-        2usize.pow(logn) - 5,
-    ]);
 
     m
 }
@@ -459,6 +454,7 @@ where
         // Generate a challenge by hashing the transcript so far
         let hide_mipp_chal: P::Fr = transcript.challenge_scalar(b"hide_mipp_chal");
 
+        // Hide C by randomizing every element
         // ρ' := chal·z₄ + ρ
         // C' := chal·C + Q
         let rho_prime = hide_mipp_chal * z4 + rho;
